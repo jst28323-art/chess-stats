@@ -5,6 +5,9 @@ const fmtPct=n=>`${(n*100).toFixed(1)}%`;
 const daysAgoTs=d=>Math.floor((Date.now()-d*86400000)/1000);
 const getFilterStart=f=>f==='24h'?daysAgoTs(1):f==='7d'?daysAgoTs(7):f==='30d'?daysAgoTs(30):f==='90d'?daysAgoTs(90):0;
 const parseMoves=pgn=>(pgn||'').replace(/\{[^}]*\}|\([^)]*\)|\[[^\]]*\]|\d+\.(\.\.)?|\$\d+|1-0|0-1|1\/2-1\/2|\*/g,' ').trim().split(/\s+/).filter(Boolean);
+const EVAL_DEPTH=4;
+const POSITION_TIMEOUT_MS=450;
+const MAX_MOVES_PER_GAME=140;
 
 const ENGINE_URLS=['./stockfish.js','https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js','https://unpkg.com/stockfish.js@10.0.2/stockfish.js'];
 const engine={w:null,ready:false,url:null,readyTimer:null,pending:null,completed:0,timeouts:0,failedReady:0,fallback:false};
@@ -61,7 +64,7 @@ function parseScore(info){
   if(m[1]==='cp') return Math.max(-1000,Math.min(1000,Number(m[2])));
   return Number(m[2])>0?1000:-1000;
 }
-async function evalFen(fen, depth=8){
+async function evalFen(fen, depth=EVAL_DEPTH){
   initEngine();
   if(engine.fallback) return null;
   if(!engine.ready){
@@ -70,7 +73,7 @@ async function evalFen(fen, depth=8){
   }
   if(engine.fallback||!engine.ready||!engine.w) return null;
   return new Promise(resolve=>{
-    engine.pending={resolve,lastInfo:'',timer:setTimeout(()=>{engine.timeouts++; cleanupPendingAsNull();},2200)};
+    engine.pending={resolve,lastInfo:'',timer:setTimeout(()=>{engine.timeouts++; cleanupPendingAsNull();},POSITION_TIMEOUT_MS)};
     engine.w.postMessage(`position fen ${fen}`);
     engine.w.postMessage(`go depth ${depth}`);
   });
@@ -93,13 +96,14 @@ async function evaluateGameMoveByMove(g,user){
   const moves=parseMoves(g.pgn);
   const chess=new Chess();
   const evals=[];
-  let prev=await evalFen(chess.fen(),8);
+  let prev=await evalFen(chess.fen(),EVAL_DEPTH);
   if(prev==null) prev=0;
   evals.push(prev);
   let myErr=0,oppErr=0,myN=0,oppN=0;
-  for(let i=0;i<moves.length;i++){
+  for(let i=0;i<Math.min(moves.length,MAX_MOVES_PER_GAME);i++){
     if(!chess.move(moves[i],{sloppy:true})) continue;
-    let e=await evalFen(chess.fen(),8);
+    if(i%20===0){ setDiag(engine.fallback?`fallback analyzing move ${i+1}`:`analyzing move ${i+1}`); }
+    let e=await evalFen(chess.fen(),EVAL_DEPTH);
     if(e==null) e=prev; // continuity for plotting every move
     evals.push(e);
     const delta=Math.abs(e-prev);
