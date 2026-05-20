@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Insights+ Pro Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chess.js@1.0.0-beta.6/dist/chess.min.js"></script>
+  <style>
+    :root { --bg:#0f1220; --panel:#171b2e; --text:#e8ebff; --muted:#9ba6d8; --good:#5bd18b; --bad:#ff7c8f; --warn:#ffca5c; }
+    body { margin:0; font-family:Inter,system-ui,sans-serif; background:var(--bg); color:var(--text); }
+    .wrap { max-width:1300px; margin:0 auto; padding:1rem; }
+    .toolbar,.toolbar2 { display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:.6rem; }
+    input,button,select { padding:.55rem .7rem; border-radius:.5rem; border:1px solid #2a3360; background:#11172d; color:var(--text); }
+    button{ cursor:pointer; background:#233265; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:.75rem; margin-bottom:1rem; }
+    .card { background:var(--panel); border:1px solid #262f56; border-radius:.8rem; padding:.8rem; }
+    .k { color:var(--muted); font-size:.85rem; } .v { font-size:1.3rem; font-weight:700; }
+    .charts,.charts2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:1rem; }
+    canvas { background:var(--panel); border:1px solid #262f56; border-radius:.8rem; padding:.5rem; }
+    .sub { color:var(--muted); }
+    .two-col{display:grid;grid-template-columns:1fr 1.2fr;gap:1rem}
+    .game-row{display:grid;grid-template-columns:95px 70px 1fr 60px 76px;gap:.4rem;width:100%;text-align:left;margin:.2rem 0;background:#11172d}
+    .win{color:var(--good)} .loss{color:var(--bad)} .draw{color:#ddd}
+    .tag{font-size:.8rem;padding:.05rem .3rem;border-radius:.3rem;border:1px solid #34407a}
+    .best{color:var(--good)} .inacc{color:#8bc8ff} .mist{color:var(--warn)} .blun{color:var(--bad)}
+    table { width:100%; border-collapse:collapse; font-size:.9rem; }
+    th,td { border-bottom:1px solid #2b345f; padding:.35rem; text-align:left; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Chess Insights+ Pro Dashboard</h1>
+  <p class="sub">Closest possible open replica of top-tier Chess.com insights using public APIs + in-browser engine.</p>
+  <div class="toolbar">
+    <input id="username" value="jst28323" />
+    <select id="rangeFilter"><option value="all">All time</option><option value="24h">Last 24h</option><option value="7d">Last 7d</option><option value="30d">Last 30d</option><option value="90d">Last 90d</option></select>
+    <select id="timeClassFilter"><option value="all">All types</option><option value="bullet">Bullet</option><option value="blitz">Blitz</option><option value="rapid">Rapid</option><option value="daily">Daily</option></select>
+    <button id="loadBtn">Load Dashboard</button>
+    <span id="status" class="sub"></span>
+  </div>
+
+  <div class="grid" id="kpis"></div>
+  <div class="charts"><canvas id="ratingChart"></canvas><canvas id="volumeChart"></canvas><canvas id="resultChart"></canvas><canvas id="oppRatingChart"></canvas></div>
+
+  <h3>Advanced Insights (subscription-like)</h3>
+  <div class="grid" id="advancedKpis"></div>
+  <div class="charts2"><canvas id="accuracyTrendChart"></canvas><canvas id="phaseMistakeChart"></canvas><canvas id="weekdayChart"></canvas><canvas id="hourChart"></canvas></div>
+
+  <h3>By Time Control</h3><div class="card"><table id="timeControlTable"></table></div>
+  <h3>Game Feed <span id="feedCount" class="sub"></span></h3>
+  <div class="two-col">
+    <div class="card" id="gamesFeed"></div>
+    <div class="card" id="gameDetails"><div class="sub">Click any game for deep engine report.</div></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
