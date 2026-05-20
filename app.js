@@ -29,6 +29,12 @@ const els={
   loadBtn:()=>document.getElementById('loadBtn')
 };
 function setStatus(msg){ const el=els.status(); if(el) el.textContent=msg; }
+function getChessCtor(){
+  if(typeof Chess!=='undefined') return Chess;
+  if(typeof window!=='undefined' && typeof window.Chess!=='undefined') return window.Chess;
+  if(typeof globalThis!=='undefined' && typeof globalThis.Chess!=='undefined') return globalThis.Chess;
+  return null;
+}
 
 
 const ENGINE_URLS=['./stockfish.js','https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js','https://unpkg.com/stockfish.js@10.0.2/stockfish.js'];
@@ -126,7 +132,9 @@ async function evaluateGameMoveByMove(g,user,onProgress){
   if(evalCache.has(key)) return evalCache.get(key);
   const {meWhite,res}=perspective(g,user);
   const moves=parseMoves(g.pgn);
-  const chess=new Chess();
+  const ChessCtor=getChessCtor();
+  if(!ChessCtor){ disableEngine('missing chess.js'); throw new Error('Chess.js failed to load (Chess is not defined)'); }
+  const chess=new ChessCtor();
   const evals=[];
   const tGameStart=Date.now();
   let prev=await evalFen(chess.fen(),EVAL_DEPTH);
