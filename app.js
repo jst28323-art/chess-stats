@@ -5,10 +5,11 @@ const fmtPct=n=>`${(n*100).toFixed(1)}%`;
 const daysAgoTs=d=>Math.floor((Date.now()-d*86400000)/1000);
 const getFilterStart=f=>f==='24h'?daysAgoTs(1):f==='7d'?daysAgoTs(7):f==='30d'?daysAgoTs(30):f==='90d'?daysAgoTs(90):0;
 const parseMoves=pgn=>(pgn||'').replace(/\{[^}]*\}|\([^)]*\)|\[[^\]]*\]|\d+\.(\.\.)?|\$\d+|1-0|0-1|1\/2-1\/2|\*/g,' ').trim().split(/\s+/).filter(Boolean);
-const EVAL_DEPTH=4;
-const POSITION_TIMEOUT_MS=450;
-const MAX_MOVES_PER_GAME=140;
-const MAX_MS_PER_GAME=20000;
+const EVAL_DEPTH=10;
+const POSITION_TIMEOUT_MS=2500;
+const MAX_MOVES_PER_GAME=300;
+const MAX_MS_PER_GAME=180000;
+const ENGINE_PROFILE=`d${EVAL_DEPTH}_pt${POSITION_TIMEOUT_MS}_mm${MAX_MOVES_PER_GAME}_mg${MAX_MS_PER_GAME}_v1`;
 
 const els={
   username:()=>document.getElementById('username'),
@@ -125,12 +126,12 @@ function perspective(g,u){const meWhite=g.white.username?.toLowerCase()===u.toLo
 function filterGames(games,user,range,timeClass,limit){const start=getFilterStart(range);return games.filter(g=>g.rated&&g.time_class&&g.end_time>=start&&(timeClass==='all'||g.time_class===timeClass)&&((g.white.username||'').toLowerCase()===user.toLowerCase()||(g.black.username||'').toLowerCase()===user.toLowerCase())).sort((a,b)=>a.end_time-b.end_time).slice(-limit);} 
 
 const evalCache=new Map();
-function saveCache(){localStorage.setItem('engineEvalCacheV3',JSON.stringify([...evalCache.entries()]));}
-function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV3'); if(raw) for(const [k,v] of JSON.parse(raw)) evalCache.set(k,v);}catch{}}
+function saveCache(){localStorage.setItem('engineEvalCacheV4',JSON.stringify([...evalCache.entries()]));}
+function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV4'); if(raw) for(const [k,v] of JSON.parse(raw)) evalCache.set(k,v);}catch{}}
 loadCache();
 
 async function evaluateGameMoveByMove(g,user,onProgress){
-  const key=(g.url||'')+':moveByMove:v3';
+  const key=(g.url||'')+`:moveByMove:${ENGINE_PROFILE}`;
   if(evalCache.has(key)) return evalCache.get(key);
   const {meWhite,res}=perspective(g,user);
   const moves=parseMoves(g.pgn);
@@ -162,18 +163,25 @@ async function evaluateGameMoveByMove(g,user,onProgress){
     myErr=base + (res==='win'?-18:res==='timeout'?18:0); oppErr=base + (res==='win'?18:-10); myN=oppN=1;
   }
   const toElo=err=>Math.max(500,Math.min(2900,2550-err*3.1));
-  const out={myEngineElo:toElo(myErr/myN),oppEngineElo:toElo(oppErr/oppN),evals,movesCount:moves.length};
+  const usedFallback = (myN===1 && oppN===1 && evals.length<=2);
+  let myEngineElo=toElo(myErr/myN), oppEngineElo=toElo(oppErr/oppN);
+  if(usedFallback){
+    const jitter=((moves.length%7)-3)*6;
+    myEngineElo=Math.max(650,myEngineElo+jitter);
+    oppEngineElo=Math.max(650,oppEngineElo-jitter);
+  }
+  const out={myEngineElo,oppEngineElo,evals,movesCount:moves.length,usedFallback};
   evalCache.set(key,out); saveCache();
   return out;
 }
 
 function renderKpis(games){const wins=games.filter(g=>perspective(g,current.user).res==='win').length;const draws=games.filter(g=>DRAW_RESULTS.has(perspective(g,current.user).res)).length;const losses=games.length-wins-draws;els.kpis().innerHTML=[['Games in view',games.length],['W/D/L',`${wins}/${draws}/${losses}`],['Win rate',games.length?fmtPct(wins/games.length):'n/a'],['Cached evals',evalCache.size]].map(([k,v])=>`<div class='glass card'><div class='k'>${k}</div><div class='v'>${v}</div></div>`).join('');}
 function makeLineChart(el,config){return new Chart(el,{...config,options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'top'},...(config.options?.plugins||{})},scales:config.options?.scales||{}}});}
-function drawSkillGraph(points){charts.skill?.destroy?.();charts.skill=makeLineChart(ratingChart,{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Chess.com Elo',data:points.map(p=>p.myElo),borderColor:'#0071e3'},{label:'Opponent Chess.com Elo',data:points.map(p=>p.oppElo),borderColor:'#8e8e93'},{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opponent Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{plugins:{title:{display:true,text:'Per-Game Skill Trend'}}}});} 
+function drawSkillGraph(points){charts.skill?.destroy?.();charts.skill=makeLineChart(els.ratingChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Chess.com Elo',data:points.map(p=>p.myElo),borderColor:'#0071e3',yAxisID:'yChess'},{label:'Opponent Chess.com Elo',data:points.map(p=>p.oppElo),borderColor:'#8e8e93',yAxisID:'yChess'},{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37',yAxisID:'yEngine'},{label:'Opponent Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318',yAxisID:'yEngine'}]},options:{plugins:{title:{display:true,text:'Per-Game Skill Trend (Dual Axis)'}},scales:{yChess:{type:'linear',position:'left',title:{display:true,text:'Chess.com Elo'}},yEngine:{type:'linear',position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Engine Elo'}}}}});} 
 function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart(els.oppRatingChart(),{type:'scatter',data:{datasets:[{label:'Engine edge vs opponent Elo',data:points.filter(p=>p.myEng&&p.oppEng).map(p=>({x:p.oppElo,y:p.myEng-p.oppEng})),backgroundColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{title:{display:true,text:'Opponent Chess.com Elo'}},y:{title:{display:true,text:'Engine Elo edge'}}}}});}
 function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(els.volumeChart(),{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
 function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
-function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}</span></button>`;}).join('');}
+function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;}).join('');}
 function drawFeedDetails(filtered,pointMap){els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div>`;
   els.gameDetails().innerHTML='<div class="sub">Click a game row to open move-by-move eval chart.</div>';
   document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',()=>{
@@ -184,7 +192,8 @@ function drawFeedDetails(filtered,pointMap){els.advancedKpis().innerHTML=`<div c
     charts.gameEval=new Chart(document.getElementById('gameEvalChart'),{type:'line',data:{labels:p.evals.map((_,ix)=>ix),datasets:[{label:'Eval cp',data:p.evals,borderColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false}});
   }));
 }
-function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);renderFeed(filtered,points);drawFeedDetails(filtered,points);setStatus(done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`);setDiag(engine.fallback?`fallback • done ${done}/${total}`:`ready • done ${done}/${total} • completed ${engine.completed} • timeouts ${engine.timeouts}`);} 
+function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);renderFeed(filtered,points);drawFeedDetails(filtered,points);setStatus(done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`);const fallbackCount=points.filter(p=>p.usedFallback).length;
+setDiag(engine.fallback?`fallback • done ${done}/${total} • fallback games ${fallbackCount}`:`ready • done ${done}/${total} • completed ${engine.completed} • timeouts ${engine.timeouts} • fallback games ${fallbackCount}`);} 
 
 let runToken=0; const current={user:'',games:[]}; let selfTested=false;
 async function run(){const user=els.username().value.trim();const range=els.rangeFilter().value;const timeClass=els.timeClassFilter().value;const limit=Number(els.gameCountFilter().value)||100;const token=++runToken;setStatus('Loading...');
@@ -192,7 +201,7 @@ async function run(){const user=els.username().value.trim();const range=els.rang
     if(!selfTested){ selfTested=true; await runEngineSelfTest(); setStatus('Engine self-test complete. Starting game evaluations...'); }
     if(current.user!==user||!current.games.length){current.user=user;current.games=await loadData(user);} 
     const filtered=filterGames(current.games,user,range,timeClass,limit);
-    const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null};});
+    const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null,usedFallback:false};});
     updateProgressive(points,filtered,0,filtered.length);
     for(let i=0;i<filtered.length;i++){
       if(token!==runToken) return;
@@ -201,6 +210,7 @@ async function run(){const user=els.username().value.trim();const range=els.rang
       points[i].myEng=Math.round(eng.myEngineElo);
       points[i].oppEng=Math.round(eng.oppEngineElo);
       points[i].evals=eng.evals;
+      points[i].usedFallback=!!eng.usedFallback;
       updateProgressive(points,filtered,i+1,filtered.length);
     }
   } catch(e){setStatus(`Error: ${e.message}`); console.error(e);}
