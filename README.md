@@ -15,9 +15,20 @@ This project aims to match top-tier paid-style chess insights as closely as poss
 ## Important note
 This is not an official Chess.com premium backend integration. It is a close functional replica using public API data and local engine analysis in your browser.
 
-## Run
+## Run locally
 ```bash
 cd /workspace/chess-stats
 python3 -m http.server
 ```
 Then open http://localhost:8000
+
+## Host free on GitHub Pages (no local download needed)
+1. Push this project to your GitHub repo.
+2. In GitHub: **Settings → Pages**.
+3. Set **Source** to `Deploy from a branch`.
+4. Choose your branch (usually `main`) and folder `/ (root)`.
+5. Save and wait ~1–3 minutes.
+
+Your public dashboard URL will be:
+
+`https://<your-github-username>.github.io/<repo-name>/`
