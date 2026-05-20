@@ -6,14 +6,14 @@ const daysAgoTs=d=>Math.floor((Date.now()-d*86400000)/1000);
 const getFilterStart=f=>f==='24h'?daysAgoTs(1):f==='7d'?daysAgoTs(7):f==='30d'?daysAgoTs(30):f==='90d'?daysAgoTs(90):0;
 const parseMoves=pgn=>(pgn||'').replace(/\{[^}]*\}|\([^)]*\)|\[[^\]]*\]|\d+\.(\.\.)?|\$\d+|1-0|0-1|1\/2-1\/2|\*/g,' ').trim().split(/\s+/).filter(Boolean);
 
-const ENGINE_URLS=[
-  'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js',
-  'https://unpkg.com/stockfish.js@10.0.2/stockfish.js'
-];
-const engine={w:null,ready:false,q:[],pending:null,fallback:true,url:null,failCount:0};
+const ENGINE_URLS=['./stockfish.js','https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js','https://unpkg.com/stockfish.js@10.0.2/stockfish.js'];
+const engine={w:null,ready:false,q:[],pending:null,fallback:true,url:null,failCount:0,completed:0,timeouts:0};
+
+function setDiag(msg){ const el=document.getElementById('engineDiag'); if(el) el.textContent=`Engine: ${msg}`; }
 
 function disableEngineMode(){
   engine.fallback=false;
+  setDiag('fallback estimate mode');
   engine.ready=false;
   if(engine.w){ try{engine.w.terminate();}catch{} }
   engine.w=null;
@@ -33,16 +33,18 @@ function initEngine(){
     try { engine.w=new Worker(url); engine.url=url; break; } catch {}
   }
   if(!engine.w){ disableEngineMode(); return; }
+  setDiag(`worker loaded (${engine.url.includes('./')?'local':'cdn'})`);
   engine.w.onmessage=e=>onEngine(String(e.data||''));
   engine.w.onerror=()=>{engine.failCount++; if(engine.failCount>=2) disableEngineMode();};
   engine.w.postMessage('uci'); engine.w.postMessage('isready');
 }
 function onEngine(line){
-  if(line==='readyok'){engine.ready=true;runNext();return;}
+  if(line==='readyok'){engine.ready=true;setDiag('stockfish ready');runNext();return;}
   if(!engine.pending) return;
   if(line.startsWith('info')&&line.includes(' score ')) engine.pending.last=line;
   if(line.startsWith('bestmove')){
     clearTimeout(engine.pending.timer);
+    engine.completed++;
     engine.pending.resolve(scoreFrom(engine.pending.last));
     engine.pending=null;
     runNext();
@@ -59,6 +61,7 @@ function runNext(){
     const p=engine.pending;
     engine.pending=null;
     engine.failCount++;
+    engine.timeouts++;
     p.resolve(null);
     if(engine.failCount>=3) disableEngineMode();
     runNext();
@@ -120,7 +123,9 @@ function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(result
 
 function renderFeed(games,points){feedCount.textContent=`${games.length} games`;gamesFeed.innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}</span></button>`;}).join('');}
 function drawFeedDetails(){advancedKpis.innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback===false?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div>`; gameDetails.innerHTML='<div class="sub">Main chart shows your Chess.com Elo and engine-estimated Elo vs opponent values per game. Use timeframe, game type, and game count filters.</div>';}
-function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);drawFeedDetails();renderFeed(filtered.slice(0,points.length),points);status.textContent=done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`;}
+function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);drawFeedDetails();renderFeed(filtered.slice(0,points.length),points);status.textContent=done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`;
+setDiag(engine.fallback===false?`fallback active • done ${done}/${total}`:`ready • done ${done}/${total} • completed ${engine.completed} • timeouts ${engine.timeouts}`);}
+
 
 let runToken=0; const current={user:'',games:[]};
 async function run(){const user=username.value.trim();const range=rangeFilter.value;const timeClass=timeClassFilter.value;const limit=Number(gameCountFilter.value)||100;const token=++runToken;status.textContent='Loading...';
