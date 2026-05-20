@@ -10,27 +10,65 @@ const ENGINE_URLS=[
   'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js',
   'https://unpkg.com/stockfish.js@10.0.2/stockfish.js'
 ];
-const engine={w:null,ready:false,q:[],pending:null,fallback:true,url:null};
+const engine={w:null,ready:false,q:[],pending:null,fallback:true,url:null,failCount:0};
+
+function disableEngineMode(){
+  engine.fallback=false;
+  engine.ready=false;
+  if(engine.w){ try{engine.w.terminate();}catch{} }
+  engine.w=null;
+  if(engine.pending){
+    try{engine.pending.resolve(null);}catch{}
+    engine.pending=null;
+  }
+  while(engine.q.length){
+    const item=engine.q.shift();
+    try{item.resolve(null);}catch{}
+  }
+}
 
 function initEngine(){
   if(engine.w||engine.fallback===false) return;
   for(const url of ENGINE_URLS){
     try { engine.w=new Worker(url); engine.url=url; break; } catch {}
   }
-  if(!engine.w){ engine.fallback=false; return; }
+  if(!engine.w){ disableEngineMode(); return; }
   engine.w.onmessage=e=>onEngine(String(e.data||''));
-  engine.w.onerror=()=>{engine.fallback=false; status.textContent='Engine worker failed; using fast estimate mode.';};
+  engine.w.onerror=()=>{engine.failCount++; if(engine.failCount>=2) disableEngineMode();};
   engine.w.postMessage('uci'); engine.w.postMessage('isready');
 }
 function onEngine(line){
   if(line==='readyok'){engine.ready=true;runNext();return;}
   if(!engine.pending) return;
   if(line.startsWith('info')&&line.includes(' score ')) engine.pending.last=line;
-  if(line.startsWith('bestmove')){engine.pending.resolve(scoreFrom(engine.pending.last)); engine.pending=null; runNext();}
+  if(line.startsWith('bestmove')){
+    clearTimeout(engine.pending.timer);
+    engine.pending.resolve(scoreFrom(engine.pending.last));
+    engine.pending=null;
+    runNext();
+  }
 }
 function scoreFrom(info){if(!info) return 0;const m=info.match(/score (cp|mate) (-?\d+)/);if(!m)return 0; if(m[1]==='cp') return Math.max(-1000,Math.min(1000,Number(m[2]))); return Number(m[2])>0?1000:-1000;}
-function runNext(){if(!engine.ready||engine.pending||!engine.q.length) return;engine.pending=engine.q.shift();engine.w.postMessage(`position fen ${engine.pending.fen}`);engine.w.postMessage(`go depth ${engine.pending.depth||7}`)}
-function evalFen(fen,depth=7){initEngine(); if(!engine.w||engine.fallback===false) return Promise.resolve(null); return new Promise(resolve=>{engine.q.push({fen,depth,resolve,last:''});runNext(); setTimeout(()=>resolve(null),3500);});}
+function runNext(){
+  if(!engine.ready||engine.pending||!engine.q.length||!engine.w) return;
+  engine.pending=engine.q.shift();
+  engine.w.postMessage(`position fen ${engine.pending.fen}`);
+  engine.w.postMessage(`go depth ${engine.pending.depth||6}`);
+  engine.pending.timer=setTimeout(()=>{
+    if(!engine.pending) return;
+    const p=engine.pending;
+    engine.pending=null;
+    engine.failCount++;
+    p.resolve(null);
+    if(engine.failCount>=3) disableEngineMode();
+    runNext();
+  }, 1800);
+}
+function evalFen(fen,depth=6){
+  initEngine();
+  if(!engine.w||engine.fallback===false) return Promise.resolve(null);
+  return new Promise(resolve=>{engine.q.push({fen,depth,resolve,last:'',timer:null});runNext();});
+}
 
 async function getJson(u){const r=await fetch(u);if(!r.ok) throw new Error(`HTTP ${r.status}: ${u}`);return r.json();}
 async function loadData(user){const idx=await getJson(`${BASE}/${user}/games/archives`);const months=await Promise.all((idx.archives||[]).map(getJson));return months.flatMap(m=>m.games||[]);}
@@ -44,7 +82,7 @@ loadCache();
 
 async function evaluateGameQuick(g,user){
   const key=(g.url||'')+':v2'; if(evalCache.has(key)) return evalCache.get(key);
-  const {me,opp,res}=perspective(g,user);
+  const {meWhite,me,opp,res}=perspective(g,user);
   const moves=parseMoves(g.pgn); let myErr=0,oppErr=0,myN=0,oppN=0;
   if(engine.fallback!==false){
     const chess=new Chess();
@@ -56,7 +94,7 @@ async function evaluateGameQuick(g,user){
       const e=await evalFen(chess.fen(),6);
       if(prev!=null && e!=null){
         const drop=Math.abs(e-prev);
-        const whiteMove=i%2===0; const meMoved=(me.color==='white'&&whiteMove)||(me.color==='black'&&!whiteMove);
+        const whiteMove=i%2===0; const meMoved=(meWhite&&whiteMove)||(!meWhite&&!whiteMove);
         if(meMoved){myErr+=drop;myN++;} else {oppErr+=drop;oppN++;}
       }
       if(e!=null) prev=e;
@@ -81,7 +119,7 @@ function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(volumeC
 function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(resultChart,{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});}
 
 function renderFeed(games,points){feedCount.textContent=`${games.length} games`;gamesFeed.innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}</span></button>`;}).join('');}
-function drawFeedDetails(){advancedKpis.innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.w?'Stockfish worker active':'Fallback estimate mode'}</div></div>`; gameDetails.innerHTML='<div class="sub">Main chart shows your Chess.com Elo and engine-estimated Elo vs opponent values per game. Use timeframe, game type, and game count filters.</div>';}
+function drawFeedDetails(){advancedKpis.innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback===false?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div>`; gameDetails.innerHTML='<div class="sub">Main chart shows your Chess.com Elo and engine-estimated Elo vs opponent values per game. Use timeframe, game type, and game count filters.</div>';}
 function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);drawFeedDetails();renderFeed(filtered.slice(0,points.length),points);status.textContent=done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`;}
 
 let runToken=0; const current={user:'',games:[]};
