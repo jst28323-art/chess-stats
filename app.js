@@ -33,6 +33,8 @@ function getChessCtor(){
   if(typeof Chess!=='undefined') return Chess;
   if(typeof window!=='undefined' && typeof window.Chess!=='undefined') return window.Chess;
   if(typeof globalThis!=='undefined' && typeof globalThis.Chess!=='undefined') return globalThis.Chess;
+  if(typeof window!=='undefined' && window.chess && typeof window.chess.Chess!=='undefined') return window.chess.Chess;
+  if(typeof globalThis!=='undefined' && globalThis.chess && typeof globalThis.chess.Chess!=='undefined') return globalThis.chess.Chess;
   return null;
 }
 
@@ -133,7 +135,7 @@ async function evaluateGameMoveByMove(g,user,onProgress){
   const {meWhite,res}=perspective(g,user);
   const moves=parseMoves(g.pgn);
   const ChessCtor=getChessCtor();
-  if(!ChessCtor){ disableEngine('missing chess.js'); throw new Error('Chess.js failed to load (Chess is not defined)'); }
+  if(!ChessCtor){ disableEngine('missing chess.js'); throw new Error('Chess.js failed to load (constructor missing). Check chess.js CDN availability.'); }
   const chess=new ChessCtor();
   const evals=[];
   const tGameStart=Date.now();

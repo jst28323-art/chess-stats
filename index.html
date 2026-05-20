@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Chess Insights+ Pro Dashboard</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chess.js@1.0.0-beta.6/dist/chess.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
   <style>
     :root {
       --bg:#f5f5f7; --panel:rgba(255,255,255,.74); --panel-solid:#fff; --text:#1d1d1f; --muted:#6e6e73;
@@ -65,7 +65,7 @@ canvas{width:100% !important;height:100% !important;}
       <select id="timeClassFilter"><option value="all">All types</option><option value="bullet">Bullet</option><option value="blitz">Blitz</option><option value="rapid">Rapid</option><option value="daily">Daily</option></select>
       <select id="gameCountFilter"><option value="50">Last 50 games</option><option value="100" selected>Last 100 games</option><option value="250">Last 250 games</option><option value="500">Last 500 games</option></select>
       <button id="loadBtn">Update Dashboard</button>
-      <span id="status" class="sub"></span><span id="buildStamp" class="sub" style="margin-left:8px">Build 2026-05-20.9</span><span id="engineDiag" class="sub" style="margin-left:8px">Engine: init</span>
+      <span id="status" class="sub"></span><span id="buildStamp" class="sub" style="margin-left:8px">Build 2026-05-20.10</span><span id="engineDiag" class="sub" style="margin-left:8px">Engine: init</span>
     </div>
   </div>
 
@@ -95,6 +95,6 @@ canvas{width:100% !important;height:100% !important;}
     </div>
   </section>
 </div>
-<script src="app.js?v=2026-05-20.9"></script>
+<script src="app.js?v=2026-05-20.10"></script>
 </body>
 </html>
