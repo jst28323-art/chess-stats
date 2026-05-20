@@ -10,9 +10,30 @@ const POSITION_TIMEOUT_MS=450;
 const MAX_MOVES_PER_GAME=140;
 const MAX_MS_PER_GAME=20000;
 
+const els={
+  username:()=>document.getElementById('username'),
+  rangeFilter:()=>document.getElementById('rangeFilter'),
+  timeClassFilter:()=>document.getElementById('timeClassFilter'),
+  gameCountFilter:()=>document.getElementById('gameCountFilter'),
+  status:()=>document.getElementById('status'),
+  engineDiag:()=>document.getElementById('engineDiag'),
+  kpis:()=>document.getElementById('kpis'),
+  ratingChart:()=>document.getElementById('ratingChart'),
+  oppRatingChart:()=>document.getElementById('oppRatingChart'),
+  volumeChart:()=>document.getElementById('volumeChart'),
+  resultChart:()=>document.getElementById('resultChart'),
+  feedCount:()=>document.getElementById('feedCount'),
+  gamesFeed:()=>document.getElementById('gamesFeed'),
+  advancedKpis:()=>document.getElementById('advancedKpis'),
+  gameDetails:()=>document.getElementById('gameDetails'),
+  loadBtn:()=>document.getElementById('loadBtn')
+};
+function setStatus(msg){ const el=els.status(); if(el) el.textContent=msg; }
+
+
 const ENGINE_URLS=['./stockfish.js','https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js','https://unpkg.com/stockfish.js@10.0.2/stockfish.js'];
 const engine={w:null,ready:false,url:null,readyTimer:null,pending:null,completed:0,timeouts:0,failedReady:0,fallback:false};
-function setDiag(msg){const el=document.getElementById('engineDiag'); if(el) el.textContent=`Engine: ${msg}`;}
+function setDiag(msg){const el=els.engineDiag(); if(el) el.textContent=`Engine: ${msg}`;}
 
 function cleanupPendingAsNull(){
   if(engine.pending){
@@ -136,43 +157,43 @@ async function evaluateGameMoveByMove(g,user,onProgress){
   return out;
 }
 
-function renderKpis(games){const wins=games.filter(g=>perspective(g,current.user).res==='win').length;const draws=games.filter(g=>DRAW_RESULTS.has(perspective(g,current.user).res)).length;const losses=games.length-wins-draws;kpis.innerHTML=[['Games in view',games.length],['W/D/L',`${wins}/${draws}/${losses}`],['Win rate',games.length?fmtPct(wins/games.length):'n/a'],['Cached evals',evalCache.size]].map(([k,v])=>`<div class='glass card'><div class='k'>${k}</div><div class='v'>${v}</div></div>`).join('');}
+function renderKpis(games){const wins=games.filter(g=>perspective(g,current.user).res==='win').length;const draws=games.filter(g=>DRAW_RESULTS.has(perspective(g,current.user).res)).length;const losses=games.length-wins-draws;els.kpis().innerHTML=[['Games in view',games.length],['W/D/L',`${wins}/${draws}/${losses}`],['Win rate',games.length?fmtPct(wins/games.length):'n/a'],['Cached evals',evalCache.size]].map(([k,v])=>`<div class='glass card'><div class='k'>${k}</div><div class='v'>${v}</div></div>`).join('');}
 function makeLineChart(el,config){return new Chart(el,{...config,options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'top'},...(config.options?.plugins||{})},scales:config.options?.scales||{}}});}
 function drawSkillGraph(points){charts.skill?.destroy?.();charts.skill=makeLineChart(ratingChart,{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Chess.com Elo',data:points.map(p=>p.myElo),borderColor:'#0071e3'},{label:'Opponent Chess.com Elo',data:points.map(p=>p.oppElo),borderColor:'#8e8e93'},{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opponent Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{plugins:{title:{display:true,text:'Per-Game Skill Trend'}}}});} 
-function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart(oppRatingChart,{type:'scatter',data:{datasets:[{label:'Engine edge vs opponent Elo',data:points.filter(p=>p.myEng&&p.oppEng).map(p=>({x:p.oppElo,y:p.myEng-p.oppEng})),backgroundColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{title:{display:true,text:'Opponent Chess.com Elo'}},y:{title:{display:true,text:'Engine Elo edge'}}}}});}
-function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(volumeChart,{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
-function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(resultChart,{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
-function renderFeed(games,points){feedCount.textContent=`${games.length} games`;gamesFeed.innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}</span></button>`;}).join('');}
-function drawFeedDetails(filtered,pointMap){advancedKpis.innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div>`;
-  gameDetails.innerHTML='<div class="sub">Click a game row to open move-by-move eval chart.</div>';
+function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart(els.oppRatingChart(),{type:'scatter',data:{datasets:[{label:'Engine edge vs opponent Elo',data:points.filter(p=>p.myEng&&p.oppEng).map(p=>({x:p.oppElo,y:p.myEng-p.oppEng})),backgroundColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{title:{display:true,text:'Opponent Chess.com Elo'}},y:{title:{display:true,text:'Engine Elo edge'}}}}});}
+function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(els.volumeChart(),{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
+function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
+function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}</span></button>`;}).join('');}
+function drawFeedDetails(filtered,pointMap){els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div>`;
+  els.gameDetails().innerHTML='<div class="sub">Click a game row to open move-by-move eval chart.</div>';
   document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',()=>{
     const i=Number(btn.dataset.idx); const p=pointMap[i];
-    if(!p || !p.evals){ gameDetails.innerHTML='<div class="sub">No move-by-move eval available yet for this game.</div>'; return; }
-    gameDetails.innerHTML='<div class="chart-card" style="height:300px"><canvas id="gameEvalChart"></canvas></div><div class="sub">Move-by-move eval (cp, White+)</div>';
+    if(!p || !p.evals){ els.gameDetails().innerHTML='<div class="sub">No move-by-move eval available yet for this game.</div>'; return; }
+    els.gameDetails().innerHTML='<div class="chart-card" style="height:300px"><canvas id="gameEvalChart"></canvas></div><div class="sub">Move-by-move eval (cp, White+)</div>';
     charts.gameEval?.destroy?.();
     charts.gameEval=new Chart(document.getElementById('gameEvalChart'),{type:'line',data:{labels:p.evals.map((_,ix)=>ix),datasets:[{label:'Eval cp',data:p.evals,borderColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false}});
   }));
 }
-function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);renderFeed(filtered,points);drawFeedDetails(filtered,points);status.textContent=done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`;setDiag(engine.fallback?`fallback • done ${done}/${total}`:`ready • done ${done}/${total} • completed ${engine.completed} • timeouts ${engine.timeouts}`);} 
+function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);renderFeed(filtered,points);drawFeedDetails(filtered,points);setStatus(done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`);setDiag(engine.fallback?`fallback • done ${done}/${total}`:`ready • done ${done}/${total} • completed ${engine.completed} • timeouts ${engine.timeouts}`);} 
 
 let runToken=0; const current={user:'',games:[]}; let selfTested=false;
-async function run(){const user=username.value.trim();const range=rangeFilter.value;const timeClass=timeClassFilter.value;const limit=Number(gameCountFilter.value)||100;const token=++runToken;status.textContent='Loading...';
+async function run(){const user=els.username().value.trim();const range=els.rangeFilter().value;const timeClass=els.timeClassFilter().value;const limit=Number(els.gameCountFilter().value)||100;const token=++runToken;setStatus('Loading...');
   try{
-    if(!selfTested){ selfTested=true; await runEngineSelfTest(); status.textContent='Engine self-test complete. Starting game evaluations...'; }
+    if(!selfTested){ selfTested=true; await runEngineSelfTest(); setStatus('Engine self-test complete. Starting game evaluations...'); }
     if(current.user!==user||!current.games.length){current.user=user;current.games=await loadData(user);} 
     const filtered=filterGames(current.games,user,range,timeClass,limit);
     const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null};});
     updateProgressive(points,filtered,0,filtered.length);
     for(let i=0;i<filtered.length;i++){
       if(token!==runToken) return;
-      status.textContent=`Evaluating game ${i+1}/${filtered.length}...`;
-      const eng=await evaluateGameMoveByMove(filtered[i],user,(mv,totalMv)=>{status.textContent=`Evaluating game ${i+1}/${filtered.length} • move ${mv}/${totalMv}`;});
+      setStatus(`Evaluating game ${i+1}/${filtered.length}...`);
+      const eng=await evaluateGameMoveByMove(filtered[i],user,(mv,totalMv)=>{setStatus(`Evaluating game ${i+1}/${filtered.length} • move ${mv}/${totalMv}`);});
       points[i].myEng=Math.round(eng.myEngineElo);
       points[i].oppEng=Math.round(eng.oppEngineElo);
       points[i].evals=eng.evals;
       updateProgressive(points,filtered,i+1,filtered.length);
     }
-  } catch(e){status.textContent=`Error: ${e.message}`;}
+  } catch(e){setStatus(`Error: ${e.message}`); console.error(e);}
 }
 
-loadBtn.addEventListener('click',run);rangeFilter.addEventListener('change',run);timeClassFilter.addEventListener('change',run);gameCountFilter.addEventListener('change',run);run();
+els.loadBtn().addEventListener('click',run);els.rangeFilter().addEventListener('change',run);els.timeClassFilter().addEventListener('change',run);els.gameCountFilter().addEventListener('change',run);run();
