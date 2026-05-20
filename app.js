@@ -8,6 +8,7 @@ const parseMoves=pgn=>(pgn||'').replace(/\{[^}]*\}|\([^)]*\)|\[[^\]]*\]|\d+\.(\.
 const EVAL_DEPTH=4;
 const POSITION_TIMEOUT_MS=450;
 const MAX_MOVES_PER_GAME=140;
+const MAX_MS_PER_GAME=20000;
 
 const ENGINE_URLS=['./stockfish.js','https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js','https://unpkg.com/stockfish.js@10.0.2/stockfish.js'];
 const engine={w:null,ready:false,url:null,readyTimer:null,pending:null,completed:0,timeouts:0,failedReady:0,fallback:false};
@@ -99,19 +100,22 @@ function saveCache(){localStorage.setItem('engineEvalCacheV3',JSON.stringify([..
 function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV3'); if(raw) for(const [k,v] of JSON.parse(raw)) evalCache.set(k,v);}catch{}}
 loadCache();
 
-async function evaluateGameMoveByMove(g,user){
+async function evaluateGameMoveByMove(g,user,onProgress){
   const key=(g.url||'')+':moveByMove:v3';
   if(evalCache.has(key)) return evalCache.get(key);
   const {meWhite,res}=perspective(g,user);
   const moves=parseMoves(g.pgn);
   const chess=new Chess();
   const evals=[];
+  const tGameStart=Date.now();
   let prev=await evalFen(chess.fen(),EVAL_DEPTH);
   if(prev==null) prev=0;
   evals.push(prev);
   let myErr=0,oppErr=0,myN=0,oppN=0;
   for(let i=0;i<Math.min(moves.length,MAX_MOVES_PER_GAME);i++){
+    if(Date.now()-tGameStart>MAX_MS_PER_GAME){ setDiag('per-game time budget reached'); break; }
     if(!chess.move(moves[i],{sloppy:true})) continue;
+    if(i%5===0 && onProgress) onProgress(i+1, Math.min(moves.length,MAX_MOVES_PER_GAME));
     if(i%20===0){ setDiag(engine.fallback?`fallback analyzing move ${i+1}`:`analyzing move ${i+1}`); }
     let e=await evalFen(chess.fen(),EVAL_DEPTH);
     if(e==null) e=prev; // continuity for plotting every move
@@ -154,14 +158,15 @@ function updateProgressive(points, filtered, done, total){renderKpis(filtered);d
 let runToken=0; const current={user:'',games:[]}; let selfTested=false;
 async function run(){const user=username.value.trim();const range=rangeFilter.value;const timeClass=timeClassFilter.value;const limit=Number(gameCountFilter.value)||100;const token=++runToken;status.textContent='Loading...';
   try{
-    if(!selfTested){ selfTested=true; await runEngineSelfTest(); }
+    if(!selfTested){ selfTested=true; await runEngineSelfTest(); status.textContent='Engine self-test complete. Starting game evaluations...'; }
     if(current.user!==user||!current.games.length){current.user=user;current.games=await loadData(user);} 
     const filtered=filterGames(current.games,user,range,timeClass,limit);
     const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null};});
     updateProgressive(points,filtered,0,filtered.length);
     for(let i=0;i<filtered.length;i++){
       if(token!==runToken) return;
-      const eng=await evaluateGameMoveByMove(filtered[i],user);
+      status.textContent=`Evaluating game ${i+1}/${filtered.length}...`;
+      const eng=await evaluateGameMoveByMove(filtered[i],user,(mv,totalMv)=>{status.textContent=`Evaluating game ${i+1}/${filtered.length} • move ${mv}/${totalMv}`;});
       points[i].myEng=Math.round(eng.myEngineElo);
       points[i].oppEng=Math.round(eng.oppEngineElo);
       points[i].evals=eng.evals;
