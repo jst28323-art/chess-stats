@@ -41,7 +41,8 @@ function initEngine(){
   engine.w.postMessage('isready');
 }
 function onEngineMsg(line){
-  if(line==='readyok'){
+  line=String(line||'').trim();
+  if(line==='readyok' || line.includes('readyok')){
     if(engine.readyTimer) clearTimeout(engine.readyTimer);
     engine.ready=true;
     setDiag('stockfish ready');
@@ -77,6 +78,15 @@ async function evalFen(fen, depth=EVAL_DEPTH){
     engine.w.postMessage(`position fen ${fen}`);
     engine.w.postMessage(`go depth ${depth}`);
   });
+}
+
+
+async function runEngineSelfTest(){
+  const startFen='rn1qkbnr/pp3ppp/2pb4/3pp3/8/2N2N2/PPPP1PPP/R1BQKB1R w KQkq - 0 6';
+  const v=await evalFen(startFen,EVAL_DEPTH);
+  if(v==null){ setDiag('self-test failed (fallback active)'); return false; }
+  setDiag(`self-test ok cp=${v}`);
+  return true;
 }
 
 async function getJson(u){const r=await fetch(u); if(!r.ok) throw new Error(`HTTP ${r.status}: ${u}`); return r.json();}
@@ -141,9 +151,10 @@ function drawFeedDetails(filtered,pointMap){advancedKpis.innerHTML=`<div class='
 }
 function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);renderFeed(filtered,points);drawFeedDetails(filtered,points);status.textContent=done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`;setDiag(engine.fallback?`fallback • done ${done}/${total}`:`ready • done ${done}/${total} • completed ${engine.completed} • timeouts ${engine.timeouts}`);} 
 
-let runToken=0; const current={user:'',games:[]};
+let runToken=0; const current={user:'',games:[]}; let selfTested=false;
 async function run(){const user=username.value.trim();const range=rangeFilter.value;const timeClass=timeClassFilter.value;const limit=Number(gameCountFilter.value)||100;const token=++runToken;status.textContent='Loading...';
   try{
+    if(!selfTested){ selfTested=true; await runEngineSelfTest(); }
     if(current.user!==user||!current.games.length){current.user=user;current.games=await loadData(user);} 
     const filtered=filterGames(current.games,user,range,timeClass,limit);
     const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null};});
