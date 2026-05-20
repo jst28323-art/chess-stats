@@ -16,7 +16,7 @@
     body{
       margin:0; color:var(--text);
       font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue",Helvetica,Arial,sans-serif;
-      background:radial-gradient(1200px 600px at 20% -10%, #ffffff, #f5f5f7 70%);
+      background:linear-gradient(180deg,#fbfbfd 0%,#f5f5f7 55%,#eef1f6 100%);
       letter-spacing:-0.01em;
     }
     .wrap{max-width:1320px; margin:0 auto; padding:28px 18px 44px}
@@ -39,7 +39,8 @@
     .section{margin-top:18px}
     .section h3{font-size:24px;letter-spacing:-.02em;margin:10px 4px}
     .charts,.charts2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
-    canvas{background:var(--panel-solid); border:1px solid var(--line); border-radius:16px; padding:10px}
+    .chart-card{height:320px;background:var(--panel-solid); border:1px solid var(--line); border-radius:16px; padding:10px;box-shadow:inset 0 1px 0 rgba(255,255,255,.6)}
+canvas{width:100% !important;height:100% !important;}
     .table-wrap,.feed,.details{padding:14px}
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left}
@@ -72,13 +73,13 @@
 
   <section class="section">
     <h3>Performance Trends</h3>
-    <div class="charts"><canvas id="ratingChart"></canvas><canvas id="volumeChart"></canvas><canvas id="resultChart"></canvas><canvas id="oppRatingChart"></canvas></div>
+    <div class="charts"><div class="chart-card"><canvas id="ratingChart"></canvas></div><div class="chart-card"><canvas id="volumeChart"></canvas></div><div class="chart-card"><canvas id="resultChart"></canvas></div><div class="chart-card"><canvas id="oppRatingChart"></canvas></div></div>
   </section>
 
   <section class="section">
     <h3>Advanced Insights</h3>
     <div class="grid" id="advancedKpis"></div>
-    <div class="charts2"><canvas id="accuracyTrendChart"></canvas><canvas id="phaseMistakeChart"></canvas><canvas id="weekdayChart"></canvas><canvas id="hourChart"></canvas></div>
+    <div class="charts2"><div class="chart-card"><canvas id="accuracyTrendChart"></canvas></div><div class="chart-card"><canvas id="phaseMistakeChart"></canvas></div><div class="chart-card"><canvas id="weekdayChart"></canvas></div><div class="chart-card"><canvas id="hourChart"></canvas></div></div>
   </section>
 
   <section class="section">
