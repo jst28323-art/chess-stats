@@ -32,3 +32,10 @@ Then open http://localhost:8000
 Your public dashboard URL will be:
 
 `https://<your-github-username>.github.io/<repo-name>/`
+
+
+## GitHub Pages quick deploy
+1. Settings → Pages
+2. Source: Deploy from a branch
+3. Branch: main (root)
+4. Visit: https://<your-github-username>.github.io/<repo-name>/
