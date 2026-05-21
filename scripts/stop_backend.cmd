@@ -5,7 +5,7 @@ cd /d "%~dp0\.."
 if exist "backend\data\backend.pid" (
   set /p PID=<backend\data\backend.pid
   echo Stopping backend pid=%PID%
-  taskkill /PID %PID% /F
+  taskkill /PID %PID% /F /T
   del backend\data\backend.pid
 ) else (
   echo No backend.pid found. Looking for uvicorn on port 8787 instead...
