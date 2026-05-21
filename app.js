@@ -584,10 +584,40 @@ function _classify(cpLoss){
   if(cpLoss >= CP_GOOD) return 'good';
   return 'best';
 }
-// Threshold (in centipawns) above which a position counts as "decided" --
-// any further move in such a position is mostly grinding rather than a real
-// chess decision, so it shouldn't pad accuracy. ±500 cp ~= ±5 pawn-units.
-const COMPETITIVE_CP_CUTOFF = 500;
+// Standard-deviation helper for the volatility window used in the
+// Lichess-style weighted accuracy blend below.
+function _stdDev(arr){
+  if(arr.length < 2) return 0;
+  const m = arr.reduce((s,x)=>s+x,0) / arr.length;
+  const v = arr.reduce((s,x)=>s+(x-m)*(x-m),0) / arr.length;
+  return Math.sqrt(v);
+}
+// Blend per-move accuracy values into a single game accuracy using the
+// Lichess-published approach: weight each ply by the local win% volatility
+// (so quiet "obvious" moves contribute less than tactical decisions), then
+// average a weighted harmonic + weighted arithmetic mean. Harmonic mean is
+// dragged down by the worst moves, which is exactly the behaviour we want
+// when a player has a 13% blunder rate alongside lots of forced/easy moves.
+function _weightedBlendedAcc(pairs){
+  if(!pairs || !pairs.length) return null;
+  let weightSum=0, accSum=0, recipSum=0;
+  for(const {acc,weight} of pairs){
+    weightSum += weight;
+    accSum    += acc * weight;
+    recipSum  += weight / Math.max(1, acc); // +1 floor to avoid div-by-zero on zero-accuracy moves
+  }
+  if(weightSum <= 0) return null;
+  const arith    = accSum / weightSum;
+  const harmonic = weightSum / recipSum;
+  return (arith + harmonic) / 2;
+}
+
+// Volatility window for weighting (in plies). Each move's contribution to
+// the blended accuracy is proportional to local win% std-dev, so quiet
+// "obvious" moves naturally weigh less and the cp-cutoff filter we had in
+// build .19 is no longer needed -- the weighting handles grinding plies
+// for free.
+const VOLATILITY_WINDOW = 4;
 
 function analyzeEvals(evals, meWhite){
   if(!Array.isArray(evals) || evals.length < 2) return null;
@@ -598,35 +628,40 @@ function analyzeEvals(evals, meWhite){
     biggestMyLoss:0, biggestMyLossPly:null, firstBlunderPly:null,
     competitive_plies:0, decided_plies:0,
   };
-  let prev=evals[0], prevWin=cpToWinPct(prev);
-  let myAccSum=0,myAccN=0,oppAccSum=0,oppAccN=0;
+  // Pre-compute win% array so we can read a small window around each ply.
+  const wins = evals.map(cp=>cpToWinPct(cp));
+  let prev=evals[0], prevWin=wins[0];
+  const myPairs=[], oppPairs=[];
   for(let i=1;i<evals.length;i++){
-    const cp=evals[i], win=cpToWinPct(cp);
+    const cp=evals[i], win=wins[i];
     const whiteMove=((i-1)%2===0);
     const meMoved=(meWhite&&whiteMove)||(!meWhite&&!whiteMove);
     const loss = whiteMove ? Math.max(0, prev-cp) : Math.max(0, cp-prev);
     const phase = i<=20?'opening':i<=50?'middlegame':'endgame';
-    // The position BEFORE this move dictates whether the ply was a real
-    // decision. After ±500cp, classifications still count (so blunder rate
-    // stays comparable across players) but accuracy stops accumulating --
-    // post-decision grinding shouldn't pad the number.
-    const isCompetitive = Math.abs(prev) < COMPETITIVE_CP_CUTOFF;
-    if(isCompetitive) a.competitive_plies++; else a.decided_plies++;
+    a.competitive_plies++;
+    // Volatility = std-dev of win% over the surrounding window. Clamped to
+    // [0.5, 12] so a totally quiet position still has nonzero weight and a
+    // single huge swing doesn't dwarf everything else.
+    const start = Math.max(0, i - VOLATILITY_WINDOW);
+    const end   = Math.min(wins.length, i + 1);
+    const weight = Math.max(0.5, Math.min(12, _stdDev(wins.slice(start, end))));
     if(meMoved){
       a.classifications.me[_classify(loss)]++;
       a.phases[phase].meLoss+=loss; a.phases[phase].meN++;
       if(loss>a.biggestMyLoss){ a.biggestMyLoss=loss; a.biggestMyLossPly=i; }
       if(a.firstBlunderPly===null && loss>=CP_BLUNDER) a.firstBlunderPly=i;
-      if(isCompetitive){ const acc=_moveAcc(prevWin,win,meWhite); myAccSum+=acc; myAccN++; }
+      const acc=_moveAcc(prevWin,win,meWhite);
+      myPairs.push({acc, weight});
     } else {
       a.classifications.opp[_classify(loss)]++;
       a.phases[phase].oppLoss+=loss; a.phases[phase].oppN++;
-      if(isCompetitive){ const acc=_moveAcc(prevWin,win,!meWhite); oppAccSum+=acc; oppAccN++; }
+      const acc=_moveAcc(prevWin,win,!meWhite);
+      oppPairs.push({acc, weight});
     }
     prev=cp; prevWin=win;
   }
-  a.accuracy.me = myAccN?myAccSum/myAccN:null;
-  a.accuracy.opp = oppAccN?oppAccSum/oppAccN:null;
+  a.accuracy.me = _weightedBlendedAcc(myPairs);
+  a.accuracy.opp = _weightedBlendedAcc(oppPairs);
   return a;
 }
 
@@ -774,10 +809,7 @@ function renderInsightsKpis(ins){
   const cl=ins.myClassifications, t=ins.myMoveTotal||1, c=ins.conversion;
   const w=ins.byColor.white, b=ins.byColor.black;
   const pct=(a,total)=>total>0?`${(a/total*100).toFixed(1)}%`:'—';
-  const totalPlies = (ins.competitivePlies||0) + (ins.decidedPlies||0);
-  const accNote = totalPlies > 0
-    ? `competitive plies only · ${ins.competitivePlies}/${totalPlies} counted`
-    : 'competitive plies only';
+  const accNote = 'Lichess-style: volatility-weighted harmonic + arithmetic blend';
   const cards=[
     ['Your accuracy', fmtAcc(ins.avgMyAccuracy), accNote],
     ['Opp accuracy', fmtAcc(ins.avgOppAccuracy), accNote],
