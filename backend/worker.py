@@ -11,7 +11,7 @@ from typing import Any
 import chess
 import chess.pgn
 
-from . import chesscom, db, openings, stockfish_adapter
+from . import chesscom, db, explain, openings, stockfish_adapter
 
 log = logging.getLogger(__name__)
 
@@ -291,6 +291,9 @@ def _analyse_one_game(
         played_uci = mv.uci()
         is_best = (best_uci is not None and played_uci == best_uci)
 
+        # Snapshot for explanation generation (needs the BEFORE position).
+        board_before = board.copy(stack=False) if not is_best else None
+
         board.push(mv)
         try:
             info = session.analyse(board)
@@ -317,6 +320,28 @@ def _analyse_one_game(
             opp_err += delta
             opp_n += 1
 
+        # cp-loss for this mover (regardless of which side they are)
+        white_moved = (i % 2 == 0)
+        cp_loss = max(0, (prev - e) if white_moved else (e - prev))
+
+        # Generate explanation when the move wasn't best and wasn't a
+        # brilliant sacrifice (per the user contract: only non-best non-
+        # brilliant moves get explained).
+        played_reason = None
+        best_reason = None
+        if board_before is not None and not (is_best and is_sac) and not is_best:
+            try:
+                ex = explain.explain_ply(
+                    board_before, played_uci, best_uci,
+                    played_eval_after=e if isinstance(e, int) else None,
+                    cp_loss=cp_loss,
+                    mover_is_white=white_moved,
+                )
+                best_reason = ex.get("best_reason")
+                played_reason = ex.get("played_reason")
+            except Exception as ex2:  # noqa: BLE001
+                log.debug("explain_ply failed: %s", ex2)
+
         plies.append({
             "ply": i + 1,
             "move": san,
@@ -331,6 +356,8 @@ def _analyse_one_game(
             "me_moved": bool(me_moved),
             "is_best": is_best,
             "is_sacrifice": is_sac,
+            "played_reason": played_reason,
+            "best_reason": best_reason,
         })
         prev = e
         prev_info = info

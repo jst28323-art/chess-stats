@@ -529,6 +529,7 @@ async function analyzeGameDetailed(g,user){
         best:p.best||'-', best_uci:p.best_uci, pv:p.pv||'',
         fen:p.fen, capture:p.capture,
         is_best:!!p.is_best, is_sacrifice:!!p.is_sacrifice,
+        played_reason:p.played_reason||null, best_reason:p.best_reason||null,
       }));
       // Attach opening metadata as a property of the array (used by the
       // review panel to show the opening name + last-book-move indicator).
@@ -1030,10 +1031,22 @@ function drawFeedDetails(filtered,pointMap){
       }
 
       const evalLabel = mate!=null ? `M${Math.abs(mate)}` : (cp!=null ? cp : 'n/a');
+      // Explanation block: only when the played move wasn't best/brilliant
+      // (in which case both `played_reason` and `best_reason` are populated
+      // by the backend). Layered as two short lines under the main ply
+      // summary so it's easy to skim.
+      let explainHtml = '';
+      const showExplain = idx >= 1 && cls && cls !== 'book' && cls !== 'best' && cls !== 'brilliant' && (r.played_reason || r.best_reason);
+      if(showExplain){
+        const greenColor = '#2ea043', blueColor = '#1d6cf2';
+        const bestLine   = r.best_reason   ? `<div style="margin:4px 0;font-size:12.5px;line-height:1.4"><span style="display:inline-block;min-width:16px;color:${greenColor};font-weight:700">▸</span><span style="color:var(--muted)">Best</span> <b>${r.best||'-'}</b> — <span style="color:var(--text)">${r.best_reason}</span></div>` : '';
+        const playedLine = r.played_reason ? `<div style="margin:4px 0;font-size:12.5px;line-height:1.4"><span style="display:inline-block;min-width:16px;color:${blueColor};font-weight:700">▸</span><span style="color:var(--muted)">You played</span> <b>${r.move||'-'}</b> — <span style="color:var(--text)">${r.played_reason}</span></div>` : '';
+        explainHtml = `<div style="margin-top:8px;padding:8px 10px;background:rgba(0,0,0,.03);border-left:3px solid #c8c8c8;border-radius:6px">${bestLine}${playedLine}</div>`;
+      }
       if(idx === 0){
         document.getElementById('plyInfo').innerHTML = `<span class='sub'>Starting position. Eval: <b>${evalLabel}</b></span>${openingHtml}`;
       } else {
-        document.getElementById('plyInfo').innerHTML = `${badge}Played: <b>${r.move||'-'}</b> | Eval: <b>${evalLabel}</b> | Best: <b>${r.best||'-'}</b> | Captured: <b>${cap||'none'}</b><br/>PV: ${r.pv||'-'}${openingHtml}`;
+        document.getElementById('plyInfo').innerHTML = `${badge}Played: <b>${r.move||'-'}</b> | Eval: <b>${evalLabel}</b> | Best: <b>${r.best||'-'}</b> | Captured: <b>${cap||'none'}</b><br/><span class="sub" style="font-size:12px">PV: ${r.pv||'-'}</span>${explainHtml}${openingHtml}`;
       }
     };
     document.getElementById('prevPly').onclick=()=>{ idx=Math.max(0,idx-1); render(); };
