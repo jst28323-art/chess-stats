@@ -6,9 +6,9 @@ const daysAgoTs=d=>Math.floor((Date.now()-d*86400000)/1000);
 const getFilterStart=f=>f==='24h'?daysAgoTs(1):f==='7d'?daysAgoTs(7):f==='30d'?daysAgoTs(30):f==='90d'?daysAgoTs(90):0;
 const parseMoves=pgn=>(pgn||'').replace(/\{[^}]*\}|\([^)]*\)|\[[^\]]*\]|\d+\.(\.\.)?|\$\d+|1-0|0-1|1\/2-1\/2|\*/g,' ').trim().split(/\s+/).filter(Boolean);
 const EVAL_DEPTH=10;
-const POSITION_TIMEOUT_MS=8000;
+const POSITION_TIMEOUT_MS=15000;
 const MAX_MOVES_PER_GAME=300;
-const MAX_MS_PER_GAME=300000;
+const MAX_MS_PER_GAME=900000;
 
 const PIECE_UNICODE={P:'♙',N:'♘',B:'♗',R:'♖',Q:'♕',K:'♔',p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
 function renderFenBoard(fen){
@@ -56,7 +56,7 @@ function getChessCtor(){
 
 
 const ENGINE_URLS=['./stockfish.js','https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js','https://unpkg.com/stockfish.js@10.0.2/stockfish.js'];
-const engine={w:null,ready:false,url:null,readyTimer:null,pending:null,completed:0,timeouts:0,failedReady:0,fallback:false};
+const engine={w:null,ready:false,url:null,readyTimer:null,pending:null,queue:[],completed:0,timeouts:0,failedReady:0,fallback:false};
 function setDiag(msg){const el=els.engineDiag(); if(el) el.textContent=`Engine: ${msg}`;}
 
 function cleanupPendingAsNull(){
@@ -73,6 +73,7 @@ function disableEngine(reason){
   engine.ready=false;
   if(engine.w){try{engine.w.terminate();}catch{}}
   engine.w=null;
+  while(engine.queue.length){ const q=engine.queue.shift(); try{q.resolve(null);}catch{} }
   setDiag(`fallback (${reason})`);
 }
 function initEngine(){
@@ -92,6 +93,7 @@ function onEngineMsg(line){
     if(engine.readyTimer) clearTimeout(engine.readyTimer);
     engine.ready=true;
     setDiag('stockfish ready');
+    dispatchNextEngineRequest();
     return;
   }
   if(!engine.pending) return;
@@ -103,6 +105,7 @@ function onEngineMsg(line){
     engine.completed++;
     const best=(line.split(' ')[1]||'').trim();
     p.resolve({score:parseScore(p.lastInfo),bestmove:best,pv:(p.lastPv||'')});
+    dispatchNextEngineRequest();
   }
 }
 function parseScore(info){
@@ -112,18 +115,26 @@ function parseScore(info){
   if(m[1]==='cp') return Math.max(-1000,Math.min(1000,Number(m[2])));
   return Number(m[2])>0?1000:-1000;
 }
+
+function dispatchNextEngineRequest(){
+  if(engine.fallback || !engine.ready || !engine.w || engine.pending || !engine.queue.length) return;
+  const req=engine.queue.shift();
+  engine.pending={...req,lastInfo:'',lastPv:'',timer:setTimeout(()=>{engine.timeouts++; cleanupPendingAsNull(); dispatchNextEngineRequest();},POSITION_TIMEOUT_MS)};
+  engine.w.postMessage(`position fen ${req.fen}`);
+  engine.w.postMessage(`go depth ${req.depth}`);
+}
+
 async function evalFen(fen, depth=EVAL_DEPTH){
   initEngine();
   if(engine.fallback) return null;
   if(!engine.ready){
     const t0=Date.now();
-    while(!engine.ready && !engine.fallback && Date.now()-t0<3200) await new Promise(r=>setTimeout(r,40));
+    while(!engine.ready && !engine.fallback && Date.now()-t0<8000) await new Promise(r=>setTimeout(r,40));
   }
-  if(engine.fallback||!engine.ready||!engine.w) return null;
+  if(engine.fallback||!engine.w) return null;
   return new Promise(resolve=>{
-    engine.pending={resolve,lastInfo:'',timer:setTimeout(()=>{engine.timeouts++; cleanupPendingAsNull();},POSITION_TIMEOUT_MS)};
-    engine.w.postMessage(`position fen ${fen}`);
-    engine.w.postMessage(`go depth ${depth}`);
+    engine.queue.push({fen,depth,resolve});
+    dispatchNextEngineRequest();
   });
 }
 
@@ -148,12 +159,12 @@ function perspective(g,u){const meWhite=g.white.username?.toLowerCase()===u.toLo
 function filterGames(games,user,range,timeClass,limit){const start=getFilterStart(range);return games.filter(g=>g.rated&&g.time_class&&g.end_time>=start&&(timeClass==='all'||g.time_class===timeClass)&&((g.white.username||'').toLowerCase()===user.toLowerCase()||(g.black.username||'').toLowerCase()===user.toLowerCase())).sort((a,b)=>a.end_time-b.end_time).slice(-limit);} 
 
 const evalCache=new Map();
-function saveCache(){localStorage.setItem('engineEvalCacheV4',JSON.stringify([...evalCache.entries()]));}
-function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV4'); if(raw) for(const [k,v] of JSON.parse(raw)) evalCache.set(k,v);}catch{}}
+function saveCache(){localStorage.setItem('engineEvalCacheV5',JSON.stringify([...evalCache.entries()]));}
+function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV5'); if(raw) for(const [k,v] of JSON.parse(raw)) evalCache.set(k,v);}catch{}}
 loadCache();
 
 async function evaluateGameMoveByMove(g,user,onProgress){
-  const key=(g.url||'')+`:moveByMove:${ENGINE_PROFILE}`;
+  const key=(g.url||'')+`:moveByMove:${ENGINE_PROFILE}:v5`;
   if(evalCache.has(key)) return evalCache.get(key);
   const {meWhite,res}=perspective(g,user);
   const moves=parseMoves(g.pgn);
@@ -236,7 +247,7 @@ async function analyzeGameDetailed(g,user){
   return rows;
 }
 
-function drawFeedDetails(filtered,pointMap){const done=pointMap.filter(p=>p.myEng!==null&&p.oppEng!==null).length;const fallbackCount=pointMap.filter(p=>p.usedFallback).length;const avgEdge=(pointMap.filter(p=>p.myEng&&p.oppEng).reduce((a,p)=>a+(p.myEng-p.oppEng),0)/(Math.max(1,pointMap.filter(p=>p.myEng&&p.oppEng).length))).toFixed(1);const totalNull=pointMap.reduce((a,p)=>a+(p.nullEvals||0),0);const totalEng=pointMap.reduce((a,p)=>a+(p.engineEvals||0),0);els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div><div class='glass card'><div class='k'>Games Evaluated</div><div class='v'>${done}/${pointMap.length}</div></div><div class='glass card'><div class='k'>Fallback Games</div><div class='v'>${fallbackCount}</div></div><div class='glass card'><div class='k'>Avg Engine Edge</div><div class='v'>${avgEdge}</div></div><div class='glass card'><div class='k'>Engine / Null Positions</div><div class='v'>${totalEng}/${totalNull}</div></div>`;
+function drawFeedDetails(filtered,pointMap){const done=pointMap.filter(p=>p.myEng!==null&&p.oppEng!==null).length;const fallbackCount=pointMap.filter(p=>p.usedFallback).length;const avgEdge=(pointMap.filter(p=>p.myEng&&p.oppEng).reduce((a,p)=>a+(p.myEng-p.oppEng),0)/(Math.max(1,pointMap.filter(p=>p.myEng&&p.oppEng).length))).toFixed(1);const totalNull=pointMap.reduce((a,p)=>a+(p.nullEvals||0),0);const totalEng=pointMap.reduce((a,p)=>a+(p.engineEvals||0),0);els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div><div class='glass card'><div class='k'>Games Evaluated</div><div class='v'>${done}/${pointMap.length}</div></div><div class='glass card'><div class='k'>Fallback Games</div><div class='v'>${fallbackCount}</div></div><div class='glass card'><div class='k'>Avg Engine Edge</div><div class='v'>${avgEdge}</div></div><div class='glass card'><div class='k'>Engine / Null Positions</div><div class='v'>${totalEng}/${totalNull}</div></div><div class='glass card'><div class='k'>Worker Timeouts</div><div class='v'>${engine.timeouts}</div></div><div class='glass card'><div class='k'>Engine Queue</div><div class='v'>${engine.queue.length}</div></div>`;
   els.gameDetails().innerHTML='<div class="sub">Click a game row to open move-by-move eval chart.</div>';
   document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',async()=>{
     const i=Number(btn.dataset.idx); const p=pointMap[i];
