@@ -584,6 +584,11 @@ function _classify(cpLoss){
   if(cpLoss >= CP_GOOD) return 'good';
   return 'best';
 }
+// Threshold (in centipawns) above which a position counts as "decided" --
+// any further move in such a position is mostly grinding rather than a real
+// chess decision, so it shouldn't pad accuracy. ±500 cp ~= ±5 pawn-units.
+const COMPETITIVE_CP_CUTOFF = 500;
+
 function analyzeEvals(evals, meWhite){
   if(!Array.isArray(evals) || evals.length < 2) return null;
   const a = {
@@ -591,6 +596,7 @@ function analyzeEvals(evals, meWhite){
     classifications:{me:{best:0,good:0,inaccuracy:0,mistake:0,blunder:0},opp:{best:0,good:0,inaccuracy:0,mistake:0,blunder:0}},
     phases:{opening:{meLoss:0,meN:0,oppLoss:0,oppN:0},middlegame:{meLoss:0,meN:0,oppLoss:0,oppN:0},endgame:{meLoss:0,meN:0,oppLoss:0,oppN:0}},
     biggestMyLoss:0, biggestMyLossPly:null, firstBlunderPly:null,
+    competitive_plies:0, decided_plies:0,
   };
   let prev=evals[0], prevWin=cpToWinPct(prev);
   let myAccSum=0,myAccN=0,oppAccSum=0,oppAccN=0;
@@ -600,16 +606,22 @@ function analyzeEvals(evals, meWhite){
     const meMoved=(meWhite&&whiteMove)||(!meWhite&&!whiteMove);
     const loss = whiteMove ? Math.max(0, prev-cp) : Math.max(0, cp-prev);
     const phase = i<=20?'opening':i<=50?'middlegame':'endgame';
+    // The position BEFORE this move dictates whether the ply was a real
+    // decision. After ±500cp, classifications still count (so blunder rate
+    // stays comparable across players) but accuracy stops accumulating --
+    // post-decision grinding shouldn't pad the number.
+    const isCompetitive = Math.abs(prev) < COMPETITIVE_CP_CUTOFF;
+    if(isCompetitive) a.competitive_plies++; else a.decided_plies++;
     if(meMoved){
-      const acc=_moveAcc(prevWin,win,meWhite); myAccSum+=acc; myAccN++;
       a.classifications.me[_classify(loss)]++;
       a.phases[phase].meLoss+=loss; a.phases[phase].meN++;
       if(loss>a.biggestMyLoss){ a.biggestMyLoss=loss; a.biggestMyLossPly=i; }
       if(a.firstBlunderPly===null && loss>=CP_BLUNDER) a.firstBlunderPly=i;
+      if(isCompetitive){ const acc=_moveAcc(prevWin,win,meWhite); myAccSum+=acc; myAccN++; }
     } else {
-      const acc=_moveAcc(prevWin,win,!meWhite); oppAccSum+=acc; oppAccN++;
       a.classifications.opp[_classify(loss)]++;
       a.phases[phase].oppLoss+=loss; a.phases[phase].oppN++;
+      if(isCompetitive){ const acc=_moveAcc(prevWin,win,!meWhite); oppAccSum+=acc; oppAccN++; }
     }
     prev=cp; prevWin=win;
   }
@@ -681,6 +693,13 @@ function aggregateInsights(filtered, points, user){
   }
   const myAccs=valid.map(x=>x.analytics.accuracy.me).filter(v=>v!=null);
   const oppAccs=valid.map(x=>x.analytics.accuracy.opp).filter(v=>v!=null);
+  // Competitive / decided ply totals (across all games) for the "X of Y plies
+  // counted" note in the KPI panel.
+  let totalCompetitive=0, totalDecided=0;
+  for(const v of valid){
+    totalCompetitive += v.analytics.competitive_plies||0;
+    totalDecided     += v.analytics.decided_plies||0;
+  }
   return {
     perGame, valid,
     avgMyAccuracy: myAccs.length?myAccs.reduce((a,b)=>a+b,0)/myAccs.length:null,
@@ -689,6 +708,7 @@ function aggregateInsights(filtered, points, user){
     phases, conversion:{leadingN,leadingWins,losingN,losingSaves},
     topBlunders, tilt, byColor:{white:w,black:b},
     weekdayStats, hourStats, byTimeControl,
+    competitivePlies: totalCompetitive, decidedPlies: totalDecided,
   };
 }
 
@@ -754,17 +774,21 @@ function renderInsightsKpis(ins){
   const cl=ins.myClassifications, t=ins.myMoveTotal||1, c=ins.conversion;
   const w=ins.byColor.white, b=ins.byColor.black;
   const pct=(a,total)=>total>0?`${(a/total*100).toFixed(1)}%`:'—';
+  const totalPlies = (ins.competitivePlies||0) + (ins.decidedPlies||0);
+  const accNote = totalPlies > 0
+    ? `competitive plies only · ${ins.competitivePlies}/${totalPlies} counted`
+    : 'competitive plies only';
   const cards=[
-    ['Your accuracy', fmtAcc(ins.avgMyAccuracy)],
-    ['Opp accuracy', fmtAcc(ins.avgOppAccuracy)],
-    ['Blunder rate', pct(cl.blunder,t)],
-    ['Mistake rate', pct(cl.mistake,t)],
-    ['Conversion (≥+2 @ 20)', c.leadingN?`${(c.leadingWins/c.leadingN*100).toFixed(0)}%  (${c.leadingWins}/${c.leadingN})`:'—'],
-    ['Resilience (≤−2 @ 20)', c.losingN?`${(c.losingSaves/c.losingN*100).toFixed(0)}%  (${c.losingSaves}/${c.losingN})`:'—'],
-    ['As white  W/D/L', w.n?`${w.wins}/${w.draws}/${w.losses}  ·  ${(w.wins/w.n*100).toFixed(0)}%`:'—'],
-    ['As black  W/D/L', b.n?`${b.wins}/${b.draws}/${b.losses}  ·  ${(b.wins/b.n*100).toFixed(0)}%`:'—'],
+    ['Your accuracy', fmtAcc(ins.avgMyAccuracy), accNote],
+    ['Opp accuracy', fmtAcc(ins.avgOppAccuracy), accNote],
+    ['Blunder rate', pct(cl.blunder,t), ''],
+    ['Mistake rate', pct(cl.mistake,t), ''],
+    ['Conversion (≥+2 @ 20)', c.leadingN?`${(c.leadingWins/c.leadingN*100).toFixed(0)}%  (${c.leadingWins}/${c.leadingN})`:'—', ''],
+    ['Resilience (≤−2 @ 20)', c.losingN?`${(c.losingSaves/c.losingN*100).toFixed(0)}%  (${c.losingSaves}/${c.losingN})`:'—', ''],
+    ['As white  W/D/L', w.n?`${w.wins}/${w.draws}/${w.losses}  ·  ${(w.wins/w.n*100).toFixed(0)}%`:'—', ''],
+    ['As black  W/D/L', b.n?`${b.wins}/${b.draws}/${b.losses}  ·  ${(b.wins/b.n*100).toFixed(0)}%`:'—', ''],
   ];
-  els.advancedKpis().innerHTML=cards.map(([k,v])=>`<div class='glass card'><div class='k'>${k}</div><div class='v' style='font-size:20px'>${v}</div></div>`).join('');
+  els.advancedKpis().innerHTML=cards.map(([k,v,note])=>`<div class='glass card'><div class='k'>${k}</div><div class='v' style='font-size:20px'>${v}</div>${note?`<div class='sub' style='font-size:10px;margin-top:2px'>${note}</div>`:''}</div>`).join('');
 }
 function drawAccuracyTrend(ins){
   const labels=ins.valid.map((_,i)=>`#${i+1}`);
