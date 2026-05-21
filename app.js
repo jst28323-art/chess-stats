@@ -78,15 +78,34 @@ const ENGINE_MOVE_MS=180;
 const MAX_MOVES_PER_GAME=300;
 const MAX_MS_PER_GAME=900000;
 
-const PIECE_UNICODE={P:'♙',N:'♘',B:'♗',R:'♖',Q:'♕',K:'♔',p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
+// Use the SOLID (Unicode "black-piece") glyphs for both colors and recolor
+// via CSS — the outlined "white-piece" glyphs (♔♕♖♗♘♙) read as empty
+// outlines on light squares. Filled glyphs + color:#fff + black stroke give
+// real white pieces that pop against either square color.
+const PIECE_SOLID={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
+const WHITE_STROKE='text-shadow:0 0 1px #000,1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000';
+const BLACK_STROKE='text-shadow:0 0 1px rgba(255,255,255,.4)';
 function renderFenBoard(fen){
   const board=fen.split(' ')[0].split('/');
-  let html='<div style="display:grid;grid-template-columns:repeat(8,42px);gap:0;border:1px solid #ccc;width:max-content">';
+  let html='<div style="display:grid;grid-template-columns:repeat(8,42px);gap:0;border:1px solid #999;width:max-content;border-radius:4px;overflow:hidden">';
   for(let r=0;r<8;r++){
     let file=0;
     for(const ch of board[r]){
-      if(/\d/.test(ch)){ for(let k=0;k<Number(ch);k++){ const dark=(r+file)%2===1; html+=`<div style="width:42px;height:42px;display:flex;align-items:center;justify-content:center;background:${dark?'#769656':'#eeeed2'}"></div>`; file++; } }
-      else { const dark=(r+file)%2===1; html+=`<div style="width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:28px;background:${dark?'#769656':'#eeeed2'}">${PIECE_UNICODE[ch]||''}</div>`; file++; }
+      if(/\d/.test(ch)){
+        for(let k=0;k<Number(ch);k++){
+          const dark=(r+file)%2===1;
+          html+=`<div style="width:42px;height:42px;background:${dark?'#769656':'#eeeed2'}"></div>`;
+          file++;
+        }
+      } else {
+        const dark=(r+file)%2===1;
+        const isWhite = ch===ch.toUpperCase();
+        const glyph = PIECE_SOLID[ch.toLowerCase()]||'';
+        const color = isWhite?'#ffffff':'#1d1d1f';
+        const stroke = isWhite?WHITE_STROKE:BLACK_STROKE;
+        html+=`<div style="width:42px;height:42px;display:flex;align-items:center;justify-content:center;background:${dark?'#769656':'#eeeed2'}"><span style="font-size:32px;line-height:1;color:${color};${stroke}">${glyph}</span></div>`;
+        file++;
+      }
     }
   }
   html+='</div>'; return html;
@@ -390,7 +409,20 @@ function drawSkillGraph(points){charts.skill?.destroy?.();charts.skill=makeLineC
 function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart(els.oppRatingChart(),{type:'scatter',data:{datasets:[{label:'Engine edge vs opponent Elo',data:points.filter(p=>p.myEng&&p.oppEng).map(p=>({x:p.oppElo,y:p.myEng-p.oppEng})),backgroundColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{title:{display:true,text:'Opponent Chess.com Elo'}},y:{title:{display:true,text:'Engine Elo edge'}}}}});}
 function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(els.volumeChart(),{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
 function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
-function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);const src=e.source==='backend'?'B':(e.source==='local'?'L':'·');return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>${src} Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;}).join('');}
+function renderFeed(games,points){
+  els.feedCount().textContent=`${games.length} games`;
+  const feed=els.gamesFeed();
+  // Cap visible rows to ~10 and let users scroll for the rest. Keep newest at top.
+  feed.style.maxHeight='560px';
+  feed.style.overflowY='auto';
+  const order=[]; for(let i=games.length-1;i>=0;i--) order.push(i);
+  feed.innerHTML=order.map(i=>{
+    const g=games[i], p=perspective(g,current.user), e=points[i];
+    const d=new Date(g.end_time*1000).toISOString().slice(0,10);
+    const src=e.source==='backend'?'B':(e.source==='local'?'L':'·');
+    return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>${src} Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;
+  }).join('');
+}
 
 async function analyzeGameDetailed(g,user){
   if(BACKEND.healthy && g && g.url && BACKEND.byUrl.has(g.url)){
@@ -711,8 +743,8 @@ function renderTopBlunders(ins){
   el.innerHTML=`<div style="padding:14px"><div class='k' style='margin-bottom:8px'>Top 5 blunders</div>${rows.join('')}</div>`;
   el.querySelectorAll('[data-blunder-idx]').forEach(btn=>btn.addEventListener('click',()=>{
     const idx=Number(btn.dataset.blunderIdx);
-    const feedBtns=document.querySelectorAll('#gamesFeed .game-row');
-    const target=feedBtns[idx];
+    // Feed is rendered newest-first but data-idx still points at the underlying array index.
+    const target=document.querySelector(`#gamesFeed .game-row[data-idx="${idx}"]`);
     if(target){ target.scrollIntoView({behavior:'smooth',block:'center'}); target.click(); }
   }));
 }
@@ -735,24 +767,112 @@ function drawFeedDetails(filtered,pointMap){
   document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',async()=>{
     const i=Number(btn.dataset.idx); const p=pointMap[i];
     if(!p || !p.evals){ els.gameDetails().innerHTML='<div class="sub">No move-by-move eval available yet for this game.</div>'; return; }
-    els.gameDetails().innerHTML='<div id="boardWrap"></div><div class="toolbar"><button id="prevPly">Prev</button><button id="nextPly">Next</button><span id="plyMeta" class="sub"></span></div><div id="plyInfo" class="sub">Loading detailed line analysis...</div><div class="chart-card" style="height:220px"><canvas id="gameEvalChart"></canvas></div>';
+    // Persistent layout: eval bar + board host are never replaced, so CSS
+    // height transitions on the bar animate smoothly between plies.
+    els.gameDetails().innerHTML=`
+      <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <div id="ebLabel" class="sub" style="font-size:13px;width:48px;text-align:center;font-variant-numeric:tabular-nums;font-weight:600;color:var(--text)">0.0</div>
+          <div style="width:26px;height:336px;border:1px solid #999;display:flex;flex-direction:column;overflow:hidden;border-radius:4px;background:#1d1d1f;box-shadow:0 1px 4px rgba(0,0,0,.12)">
+            <div id="ebBlack" style="background:#1d1d1f;width:100%;height:50%;transition:height .35s cubic-bezier(.2,.7,.2,1)"></div>
+            <div id="ebWhite" style="background:#f8f8fb;width:100%;height:50%;transition:height .35s cubic-bezier(.2,.7,.2,1);border-top:1px solid rgba(0,0,0,.25)"></div>
+          </div>
+        </div>
+        <div id="boardHost"></div>
+      </div>
+      <div class="toolbar" style="margin-top:10px">
+        <button id="prevPly">Prev</button>
+        <button id="nextPly">Next</button>
+        <span id="plyMeta" class="sub"></span>
+        <span class="sub" style="margin-left:auto;font-size:11px">← → arrow keys</span>
+      </div>
+      <div id="plyInfo" class="sub" style="margin-top:6px">Loading detailed line analysis...</div>
+      <div class="chart-card" style="height:220px;margin-top:10px"><canvas id="gameEvalChart"></canvas></div>
+    `;
+    const evals = p.evals || [];
     charts.gameEval?.destroy?.();
-    charts.gameEval=new Chart(document.getElementById('gameEvalChart'),{type:'line',data:{labels:p.evals.map((_,ix)=>ix),datasets:[{label:'Eval cp',data:p.evals,borderColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false}});
+    charts.gameEval=new Chart(document.getElementById('gameEvalChart'),{
+      type:'line',
+      data:{labels:evals.map((_,ix)=>ix),datasets:[{
+        label:'Eval cp', data:evals, borderColor:'#0071e3', borderWidth:1.6, tension:0.15,
+        pointRadius: evals.map(()=>0),
+        pointBackgroundColor: evals.map(()=>'transparent'),
+        pointBorderWidth: 0,
+        pointHoverRadius: 4,
+        pointHitRadius: 12,
+      }]},
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{display:false}, title:{display:true,text:'Game eval — click to jump'}},
+        interaction:{intersect:false, mode:'index'},
+        onClick:(evt,items)=>{ if(items && items.length){ idx=items[0].index; render(); } },
+      }
+    });
     const rows=await analyzeGameDetailed(filtered[i],current.user);
     const ChessCtor=getChessCtor(); const chess=new ChessCtor(); const moves=parseMoves(filtered[i].pgn);
     const fens=[chess.fen()]; const caps=[null];
     for(const m of moves){ const mv=chess.move(m,{sloppy:true}); if(!mv) continue; fens.push(chess.fen()); caps.push(mv.captured?mv.captured:null); }
     let idx=0;
-    const render=()=>{ 
-      const fen=fens[Math.min(idx,fens.length-1)];
-      document.getElementById('boardWrap').innerHTML=renderFenBoard(fen);
-      const r=rows[Math.min(idx,Math.max(0,rows.length-1))]||{};
-      const cap=caps[Math.min(idx,caps.length-1)];
-      document.getElementById('plyMeta').textContent=`Ply ${idx}/${fens.length-1}`;
-      document.getElementById('plyInfo').innerHTML=`Played: <b>${r.move||'-'}</b> | Eval: <b>${r.eval??'n/a'}</b> | Best: <b>${r.best||'-'}</b> | Captured: <b>${cap||'none'}</b><br/>PV: ${r.pv||'-'}`;
+
+    const updateEvalBar = (cp, mateVal) => {
+      let pct;
+      if(mateVal != null){ pct = mateVal > 0 ? 100 : 0; }
+      else if(cp == null){ pct = 50; }
+      else { pct = Math.max(2, Math.min(98, cpToWinPct(cp))); }
+      const ebW=document.getElementById('ebWhite'), ebB=document.getElementById('ebBlack');
+      if(ebW) ebW.style.height = pct + '%';
+      if(ebB) ebB.style.height = (100 - pct) + '%';
+      const lbl=document.getElementById('ebLabel');
+      if(lbl){
+        if(mateVal != null){ lbl.textContent = (mateVal>0?'+':'-') + 'M' + Math.abs(mateVal); }
+        else if(cp == null){ lbl.textContent = '—'; }
+        else { const v = cp/100; lbl.textContent = (v>=0?'+':'') + v.toFixed(1); }
+      }
+    };
+    const updateChartHighlight = () => {
+      const ch = charts.gameEval; if(!ch) return;
+      const ds = ch.data.datasets[0]; const n = ds.data.length;
+      const radius = new Array(n).fill(0); const fill = new Array(n).fill('transparent');
+      const safe = Math.max(0, Math.min(n-1, idx));
+      radius[safe] = 6; fill[safe] = '#b42318';
+      ds.pointRadius = radius; ds.pointBackgroundColor = fill;
+      ch.update('none');
+    };
+
+    const render = () => {
+      const fen = fens[Math.min(idx, fens.length-1)];
+      document.getElementById('boardHost').innerHTML = renderFenBoard(fen);
+      // Ply 0 = starting position (no row); ply k>=1 corresponds to rows[k-1].
+      let r={}, cap=null, cp=null, mate=null;
+      if(idx === 0){
+        cp = evals[0] != null ? evals[0] : 0;
+      } else {
+        r = rows[idx-1] || {};
+        cap = caps[idx];
+        cp = (r.eval != null) ? r.eval : (evals[idx] != null ? evals[idx] : null);
+        mate = (r.mate != null) ? r.mate : null;
+      }
+      updateEvalBar(cp, mate);
+      updateChartHighlight();
+      document.getElementById('plyMeta').textContent = `Ply ${idx}/${fens.length-1}`;
+      const evalLabel = mate!=null ? `M${Math.abs(mate)}` : (cp!=null ? cp : 'n/a');
+      if(idx === 0){
+        document.getElementById('plyInfo').innerHTML = `<span class='sub'>Starting position. Eval: <b>${evalLabel}</b></span>`;
+      } else {
+        document.getElementById('plyInfo').innerHTML = `Played: <b>${r.move||'-'}</b> | Eval: <b>${evalLabel}</b> | Best: <b>${r.best||'-'}</b> | Captured: <b>${cap||'none'}</b><br/>PV: ${r.pv||'-'}`;
+      }
     };
     document.getElementById('prevPly').onclick=()=>{ idx=Math.max(0,idx-1); render(); };
     document.getElementById('nextPly').onclick=()=>{ idx=Math.min(fens.length-1,idx+1); render(); };
+    // Arrow-key navigation (single global handler, rebound each open).
+    if(window.__chessReviewKeyHandler){ document.removeEventListener('keydown', window.__chessReviewKeyHandler); }
+    const keyHandler = (e) => {
+      if(e.target && (e.target.tagName==='INPUT' || e.target.tagName==='TEXTAREA' || e.target.isContentEditable)) return;
+      if(e.key==='ArrowLeft'){ idx=Math.max(0,idx-1); render(); e.preventDefault(); }
+      else if(e.key==='ArrowRight'){ idx=Math.min(fens.length-1,idx+1); render(); e.preventDefault(); }
+    };
+    window.__chessReviewKeyHandler = keyHandler;
+    document.addEventListener('keydown', keyHandler);
     render();
   }));
 }
