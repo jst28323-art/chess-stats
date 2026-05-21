@@ -187,8 +187,8 @@ async function evaluateGameMoveByMove(g,user,onProgress){
     engineEvals += addEngine;
     lowConfidence = engineEvals < Math.max(3, Math.floor((myN+oppN)*0.15));
   }
-  const usedFallback = (myN===1 && oppN===1 && evals.length<=2) || lowConfidence || (engineEvals===0) || (myEngineElo===500 && oppEngineElo===500);
   let myEngineElo=toElo(myErr/myN), oppEngineElo=toElo(oppErr/oppN);
+  const usedFallback = (myN===1 && oppN===1 && evals.length<=2) || lowConfidence || (engineEvals===0) || (myEngineElo===500 && oppEngineElo===500);
   if(usedFallback){
     const jitter=((moves.length%7)-3)*6;
     myEngineElo=Math.max(650,myEngineElo+jitter);
