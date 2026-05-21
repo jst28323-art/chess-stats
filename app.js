@@ -1,4 +1,15 @@
 const BASE='https://api.chess.com/pub/player';
+const DEFAULT_BACKEND_URL='http://localhost:8787';
+const BACKEND={
+  url:(localStorage.getItem('backendUrl')||DEFAULT_BACKEND_URL).replace(/\/+$/,''),
+  healthy:false,        // probed and stockfish available
+  online:false,         // probed and responding (even if stockfish missing)
+  info:null,
+  byUrl:new Map(),      // game_url -> backend game record (includes evals[], elos, game_id)
+  detailCache:new Map(),// game_url -> per-ply rows (from /api/game/{id}/analysis)
+  jobId:null,
+  jobStatus:null,
+};
 const charts={};
 const DRAW_RESULTS=new Set(['agreed','repetition','stalemate','timevsinsufficient','insufficient','50move']);
 const fmtPct=n=>`${(n*100).toFixed(1)}%`;
@@ -34,6 +45,11 @@ const els={
   gameCountFilter:()=>document.getElementById('gameCountFilter'),
   status:()=>document.getElementById('status'),
   engineDiag:()=>document.getElementById('engineDiag'),
+  backendUrl:()=>document.getElementById('backendUrl'),
+  backendStatus:()=>document.getElementById('backendStatus'),
+  backendJob:()=>document.getElementById('backendJob'),
+  backendConnectBtn:()=>document.getElementById('backendConnectBtn'),
+  preferBackend:()=>document.getElementById('preferBackend'),
   kpis:()=>document.getElementById('kpis'),
   ratingChart:()=>document.getElementById('ratingChart'),
   oppRatingChart:()=>document.getElementById('oppRatingChart'),
@@ -46,6 +62,77 @@ const els={
   loadBtn:()=>document.getElementById('loadBtn')
 };
 function setStatus(msg){ const el=els.status(); if(el) el.textContent=msg; }
+function setBackendChip(msg, kind){
+  const el=els.backendStatus(); if(!el) return;
+  el.textContent=msg;
+  el.style.color = kind==='good'?'var(--good)':kind==='bad'?'var(--bad)':kind==='warn'?'var(--warn)':'var(--muted)';
+}
+function setBackendJobChip(msg){ const el=els.backendJob(); if(el) el.textContent=msg||''; }
+
+async function probeBackend(){
+  const base=BACKEND.url;
+  if(!base){ BACKEND.online=false; BACKEND.healthy=false; setBackendChip('Backend: not configured','warn'); return null; }
+  try{
+    const r=await fetch(base+'/health',{mode:'cors'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const info=await r.json();
+    BACKEND.info=info; BACKEND.online=true;
+    BACKEND.healthy=!!info?.stockfish?.available;
+    if(BACKEND.healthy){ setBackendChip(`Backend: online • ${info.engine_profile}`,'good'); }
+    else { setBackendChip('Backend: online but stockfish missing — see README','warn'); }
+    return info;
+  }catch(e){
+    BACKEND.online=false; BACKEND.healthy=false; BACKEND.info=null;
+    setBackendChip(`Backend: offline (${e.message})`,'bad');
+    return null;
+  }
+}
+
+async function startBackendJob(user,range,timeClass,limit){
+  const r=await fetch(`${BACKEND.url}/api/analyze/player/${encodeURIComponent(user)}`,{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({range,timeClass,limit,forceRecompute:false}),
+  });
+  if(!r.ok) throw new Error('job POST HTTP '+r.status);
+  const data=await r.json(); BACKEND.jobId=data.job_id; return data.job_id;
+}
+async function fetchBackendJob(jobId){
+  const r=await fetch(`${BACKEND.url}/api/jobs/${jobId}`);
+  if(!r.ok) throw new Error('job GET HTTP '+r.status);
+  return r.json();
+}
+async function fetchBackendGames(user,range,timeClass,limit){
+  const q=new URLSearchParams({range,timeClass,limit:String(limit)});
+  const r=await fetch(`${BACKEND.url}/api/player/${encodeURIComponent(user)}/games?${q}`);
+  if(!r.ok) throw new Error('games HTTP '+r.status);
+  const data=await r.json();
+  BACKEND.byUrl.clear();
+  for(const g of (data.games||[])) BACKEND.byUrl.set(g.game_url, g);
+  return data;
+}
+async function fetchBackendGameAnalysis(gameUrl){
+  if(BACKEND.detailCache.has(gameUrl)) return BACKEND.detailCache.get(gameUrl);
+  const rec=BACKEND.byUrl.get(gameUrl);
+  if(!rec || !rec.game_id) return null;
+  try{
+    const r=await fetch(`${BACKEND.url}/api/game/${rec.game_id}/analysis`);
+    if(!r.ok) return null;
+    const a=await r.json();
+    BACKEND.detailCache.set(gameUrl,a);
+    return a;
+  }catch{ return null; }
+}
+function backendGameToChesscomShape(g){
+  return {
+    url: g.game_url,
+    end_time: g.end_time,
+    time_class: g.time_class,
+    rated: true,
+    white: g.white || {username:g.me_white?g.me_user:g.opp_user, rating:g.me_white?g.me_rating:g.opp_rating, result:g.me_white?g.result:undefined},
+    black: g.black || {username:g.me_white?g.opp_user:g.me_user, rating:g.me_white?g.opp_rating:g.me_rating, result:g.me_white?undefined:g.result},
+    pgn: null,
+  };
+}
 function getChessCtor(){
   if(typeof Chess!=='undefined') return Chess;
   if(typeof window!=='undefined' && typeof window.Chess!=='undefined') return window.Chess;
@@ -165,6 +252,20 @@ function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV6'); if
 loadCache();
 
 async function evaluateGameMoveByMove(g,user,onProgress){
+  // Backend-first: if backend ran this game's analysis, use it verbatim.
+  const beRec = BACKEND.healthy && g && g.url ? BACKEND.byUrl.get(g.url) : null;
+  if(beRec && beRec.has_analysis && Array.isArray(beRec.evals) && beRec.evals.length){
+    return {
+      myEngineElo: beRec.my_engine_elo,
+      oppEngineElo: beRec.opp_engine_elo,
+      evals: beRec.evals,
+      movesCount: beRec.moves_count||0,
+      usedFallback: !!beRec.used_fallback,
+      nullEvals: beRec.null_evals||0,
+      engineEvals: beRec.engine_evals||0,
+      source: 'backend',
+    };
+  }
   const key=(g.url||'')+`:moveByMove:${ENGINE_PROFILE}:v6`;
   if(evalCache.has(key)) return evalCache.get(key);
   const {meWhite,res}=perspective(g,user);
@@ -232,9 +333,15 @@ function drawSkillGraph(points){charts.skill?.destroy?.();charts.skill=makeLineC
 function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart(els.oppRatingChart(),{type:'scatter',data:{datasets:[{label:'Engine edge vs opponent Elo',data:points.filter(p=>p.myEng&&p.oppEng).map(p=>({x:p.oppElo,y:p.myEng-p.oppEng})),backgroundColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{title:{display:true,text:'Opponent Chess.com Elo'}},y:{title:{display:true,text:'Engine Elo edge'}}}}});}
 function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(els.volumeChart(),{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
 function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
-function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;}).join('');}
+function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);const src=e.source==='backend'?'B':(e.source==='local'?'L':'·');return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>${src} Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;}).join('');}
 
 async function analyzeGameDetailed(g,user){
+  if(BACKEND.healthy && g && g.url && BACKEND.byUrl.has(g.url)){
+    const a=await fetchBackendGameAnalysis(g.url);
+    if(a && Array.isArray(a.plies) && a.plies.length){
+      return a.plies.map(p=>({ply:p.ply,move:p.move,eval:p.eval,best:p.best||'-',pv:p.pv||'',fen:p.fen,capture:p.capture}));
+    }
+  }
   const ChessCtor=getChessCtor();
   if(!ChessCtor) return [];
   const moves=parseMoves(g.pgn);
@@ -278,26 +385,165 @@ function updateProgressive(points, filtered, done, total){renderKpis(filtered);d
 setDiag(engine.fallback?`fallback • done ${done}/${total} • fallback games ${fallbackCount}`:`ready • done ${done}/${total} • completed ${engine.completed} • timeouts ${engine.timeouts} • fallback games ${fallbackCount}`);} 
 
 let runToken=0; const current={user:'',games:[]}; let selfTested=false;
-async function run(){const user=els.username().value.trim();const range=els.rangeFilter().value;const timeClass=els.timeClassFilter().value;const limit=Number(els.gameCountFilter().value)||100;const token=++runToken;setStatus('Loading...');
+
+function pointsFromGames(filtered,user){
+  return filtered.map((g,i)=>{
+    const p=perspective(g,user);
+    return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,
+            myElo:p.me.rating||null, oppElo:p.opp.rating||null,
+            myEng:null, oppEng:null, evals:null,
+            usedFallback:false, nullEvals:0, engineEvals:0, source:null};
+  });
+}
+function applyBackendRowToPoint(point, beRec){
+  if(!beRec) return;
+  point.myEng = beRec.my_engine_elo!=null?Math.round(beRec.my_engine_elo):point.myEng;
+  point.oppEng = beRec.opp_engine_elo!=null?Math.round(beRec.opp_engine_elo):point.oppEng;
+  if(Array.isArray(beRec.evals) && beRec.evals.length) point.evals = beRec.evals;
+  point.usedFallback = !!beRec.used_fallback;
+  point.nullEvals = beRec.null_evals||0;
+  point.engineEvals = beRec.engine_evals||0;
+  point.source = beRec.has_analysis ? 'backend' : point.source;
+}
+
+async function runBackend(user,range,timeClass,limit,token){
+  setStatus('Backend: starting job…');
+  let jobId;
   try{
-    if(!selfTested){ selfTested=true; await runEngineSelfTest(); setStatus('Engine self-test complete. Starting game evaluations...'); }
-    if(current.user!==user||!current.games.length){current.user=user;current.games=await loadData(user);} 
-    const filtered=filterGames(current.games,user,range,timeClass,limit);
-    const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null,usedFallback:false,nullEvals:0,engineEvals:0};});
-    updateProgressive(points,filtered,0,filtered.length);
+    jobId=await startBackendJob(user,range,timeClass,limit);
+    setBackendJobChip(`Job ${jobId.slice(0,8)}: queued`);
+  }catch(e){
+    setBackendJobChip(`Job kickoff failed: ${e.message}`);
+    setStatus('Backend kickoff failed — falling back to local.');
+    BACKEND.healthy=false; setBackendChip('Backend: kickoff failed','bad');
+    return runLocal(user,range,timeClass,limit,token);
+  }
+
+  // Pull chess.com archive in parallel so we have PGN-shaped objects for the
+  // feed/details panel. If it fails we still render from backend rows.
+  let ccPromise = null;
+  if(current.user!==user||!current.games.length){
+    current.user=user;
+    ccPromise = loadData(user).then(g=>{current.games=g;}).catch(()=>{current.games=[];});
+  }
+
+  // Poll loop: refresh games payload + job status every couple of seconds.
+  let lastStatus='queued';
+  let filtered = [];
+  let points = [];
+  // Eagerly render an empty state immediately.
+  els.gamesFeed().innerHTML='<div class="sub" style="padding:14px">Waiting for backend analysis…</div>';
+
+  while(true){
+    if(token!==runToken) return;
+    let job=null, gamesResp=null;
+    try{ job=await fetchBackendJob(jobId); }catch{ /* keep polling */ }
+    try{ gamesResp=await fetchBackendGames(user,range,timeClass,limit); }catch{ /* keep polling */ }
+    if(job){
+      BACKEND.jobStatus=job; lastStatus=job.status;
+      setBackendJobChip(`Job ${jobId.slice(0,8)}: ${job.status} ${job.progress}/${job.total} ${job.message||''}`);
+      setStatus(job.status==='running'?`Backend analysing ${job.progress}/${job.total}…`
+              :job.status==='completed'?`Backend done: ${job.progress}/${job.total} games.`
+              :job.status==='failed'?`Backend job failed: ${job.error||'unknown'}`
+              :`Backend: ${job.status}`);
+    }
+    if(gamesResp && Array.isArray(gamesResp.games) && gamesResp.games.length){
+      // Build filtered from backend rows (oldest-first); merge chess.com PGN if available.
+      await (ccPromise||Promise.resolve());
+      const ccByUrl=new Map((current.games||[]).map(g=>[g.url,g]));
+      filtered = gamesResp.games.map(g=> ccByUrl.get(g.game_url) || backendGameToChesscomShape(g));
+      points = pointsFromGames(filtered,user);
+      for(let i=0;i<filtered.length;i++){
+        const be = BACKEND.byUrl.get(filtered[i].url);
+        if(be) applyBackendRowToPoint(points[i], be);
+      }
+      updateProgressive(points, filtered, points.filter(p=>p.source==='backend').length, points.length);
+    }
+    if(lastStatus==='completed' || lastStatus==='failed') break;
+    await new Promise(r=>setTimeout(r,2000));
+  }
+
+  // For any game the backend couldn't analyse (e.g. transient error), fall
+  // back to the local engine so the user still sees something.
+  if(lastStatus==='completed' && filtered.length){
     for(let i=0;i<filtered.length;i++){
       if(token!==runToken) return;
-      setStatus(`Evaluating game ${i+1}/${filtered.length}...`);
-      const eng=await evaluateGameMoveByMove(filtered[i],user,(mv,totalMv)=>{setStatus(`Evaluating game ${i+1}/${filtered.length} • move ${mv}/${totalMv}`);});
-      points[i].myEng=Math.round(eng.myEngineElo);
-      points[i].oppEng=Math.round(eng.oppEngineElo);
-      points[i].evals=eng.evals;
-      points[i].usedFallback=!!eng.usedFallback || (Math.round(eng.myEngineElo)===500 && Math.round(eng.oppEngineElo)===500);
-      points[i].nullEvals=eng.nullEvals||0;
-      points[i].engineEvals=eng.engineEvals||0;
-      updateProgressive(points,filtered,i+1,filtered.length);
+      if(points[i].source==='backend') continue;
+      setStatus(`Local fallback for game ${i+1}/${filtered.length}…`);
+      try{
+        const eng=await evaluateGameMoveByMove(filtered[i],user);
+        if(eng){
+          points[i].myEng=Math.round(eng.myEngineElo);
+          points[i].oppEng=Math.round(eng.oppEngineElo);
+          points[i].evals=eng.evals;
+          points[i].usedFallback=!!eng.usedFallback;
+          points[i].nullEvals=eng.nullEvals||0;
+          points[i].engineEvals=eng.engineEvals||0;
+          points[i].source=eng.source||'local';
+          updateProgressive(points,filtered,i+1,filtered.length);
+        }
+      }catch(e){ console.warn('local fallback failed for game',i,e); }
+    }
+    setStatus(`Done. ${filtered.length} games (backend ${points.filter(p=>p.source==='backend').length}, local ${points.filter(p=>p.source==='local').length}).`);
+  }
+}
+
+async function runLocal(user,range,timeClass,limit,token){
+  if(!selfTested){ selfTested=true; await runEngineSelfTest(); setStatus('Engine self-test complete. Starting game evaluations...'); }
+  if(current.user!==user||!current.games.length){current.user=user;current.games=await loadData(user);}
+  const filtered=filterGames(current.games,user,range,timeClass,limit);
+  const points=pointsFromGames(filtered,user);
+  updateProgressive(points,filtered,0,filtered.length);
+  for(let i=0;i<filtered.length;i++){
+    if(token!==runToken) return;
+    setStatus(`Evaluating game ${i+1}/${filtered.length}...`);
+    const eng=await evaluateGameMoveByMove(filtered[i],user,(mv,totalMv)=>{setStatus(`Evaluating game ${i+1}/${filtered.length} • move ${mv}/${totalMv}`);});
+    points[i].myEng=Math.round(eng.myEngineElo);
+    points[i].oppEng=Math.round(eng.oppEngineElo);
+    points[i].evals=eng.evals;
+    points[i].usedFallback=!!eng.usedFallback || (Math.round(eng.myEngineElo)===500 && Math.round(eng.oppEngineElo)===500);
+    points[i].nullEvals=eng.nullEvals||0;
+    points[i].engineEvals=eng.engineEvals||0;
+    points[i].source=eng.source||'local';
+    updateProgressive(points,filtered,i+1,filtered.length);
+  }
+}
+
+async function run(){
+  const user=els.username().value.trim();
+  const range=els.rangeFilter().value;
+  const timeClass=els.timeClassFilter().value;
+  const limit=Number(els.gameCountFilter().value)||100;
+  const token=++runToken;
+  setStatus('Loading...');
+  try{
+    const preferBackend = (els.preferBackend()?.checked!==false);
+    if(preferBackend){ await probeBackend(); }
+    if(preferBackend && BACKEND.healthy){
+      await runBackend(user,range,timeClass,limit,token);
+    } else {
+      await runLocal(user,range,timeClass,limit,token);
     }
   } catch(e){setStatus(`Error: ${e.message}`); console.error(e);}
 }
 
-els.loadBtn().addEventListener('click',run);els.rangeFilter().addEventListener('change',run);els.timeClassFilter().addEventListener('change',run);els.gameCountFilter().addEventListener('change',run);run();
+els.loadBtn().addEventListener('click',run);els.rangeFilter().addEventListener('change',run);els.timeClassFilter().addEventListener('change',run);els.gameCountFilter().addEventListener('change',run);
+
+if(els.backendUrl()){
+  els.backendUrl().value = BACKEND.url || DEFAULT_BACKEND_URL;
+  els.backendUrl().addEventListener('change',()=>{
+    BACKEND.url = (els.backendUrl().value||DEFAULT_BACKEND_URL).replace(/\/+$/,'');
+    localStorage.setItem('backendUrl', BACKEND.url);
+    BACKEND.byUrl.clear(); BACKEND.detailCache.clear();
+    probeBackend();
+  });
+}
+if(els.backendConnectBtn()){
+  els.backendConnectBtn().addEventListener('click',()=>{
+    BACKEND.url = (els.backendUrl().value||DEFAULT_BACKEND_URL).replace(/\/+$/,'');
+    localStorage.setItem('backendUrl', BACKEND.url);
+    BACKEND.byUrl.clear(); BACKEND.detailCache.clear();
+    probeBackend();
+  });
+}
+probeBackend().finally(()=>run());

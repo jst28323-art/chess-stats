@@ -65,7 +65,14 @@ canvas{width:100% !important;height:100% !important;}
       <select id="timeClassFilter"><option value="all">All types</option><option value="bullet">Bullet</option><option value="blitz">Blitz</option><option value="rapid">Rapid</option><option value="daily">Daily</option></select>
       <select id="gameCountFilter"><option value="50">Last 50 games</option><option value="100" selected>Last 100 games</option><option value="250">Last 250 games</option><option value="500">Last 500 games</option></select>
       <button id="loadBtn">Update Dashboard</button>
-      <span id="status" class="sub"></span><span id="buildStamp" class="sub" style="margin-left:8px">Build 2026-05-21.7</span><span id="engineDiag" class="sub" style="margin-left:8px">Engine: init</span>
+      <span id="status" class="sub"></span><span id="buildStamp" class="sub" style="margin-left:8px">Build 2026-05-21.8</span><span id="engineDiag" class="sub" style="margin-left:8px">Engine: init</span>
+    </div>
+    <div class="toolbar" style="margin-top:6px">
+      <input id="backendUrl" placeholder="http://localhost:8787" style="min-width:240px" />
+      <button id="backendConnectBtn" type="button" style="background:#475467;box-shadow:0 6px 18px rgba(71,84,103,.32)">Connect Backend</button>
+      <label class="sub" style="display:flex;align-items:center;gap:6px;padding:0 6px"><input type="checkbox" id="preferBackend" checked />Prefer backend</label>
+      <span id="backendStatus" class="sub">Backend: probing…</span>
+      <span id="backendJob" class="sub"></span>
     </div>
   </div>
 
@@ -95,6 +102,6 @@ canvas{width:100% !important;height:100% !important;}
     </div>
   </section>
 </div>
-<script src="app.js?v=2026-05-21.7"></script>
+<script src="app.js?v=2026-05-21.8"></script>
 </body>
 </html>
