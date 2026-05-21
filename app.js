@@ -11,26 +11,60 @@ const BACKEND={
   jobId:null,
   jobStatus:null,
 };
-async function discoverBackendUrl(){
-  // Resolution order:
-  //  1. localStorage 'backendUrl' (user-set, sticky)
-  //  2. ./tunnel.json from same origin (auto-published by scripts/launch_tunnel.py)
-  //  3. DEFAULT_BACKEND_URL (localhost — only useful when frontend is on same PC)
-  if(BACKEND.url){ BACKEND.urlSource='localStorage'; return BACKEND.url; }
+async function fetchTunnelJsonUrl(){
   try{
     const r=await fetch('./tunnel.json?ts='+Date.now(),{cache:'no-store'});
-    if(r.ok){
-      const j=await r.json();
-      if(j && j.backendUrl){
-        BACKEND.url = String(j.backendUrl).replace(/\/+$/,'');
-        BACKEND.urlSource='tunnel.json';
-        return BACKEND.url;
-      }
+    if(!r.ok) return null;
+    const j=await r.json();
+    return j && j.backendUrl ? String(j.backendUrl).replace(/\/+$/,'') : null;
+  }catch{ return null; }
+}
+async function probeOne(url){
+  try{
+    const r=await fetch(url+'/health',{mode:'cors',cache:'no-store'});
+    if(!r.ok) return null;
+    return await r.json();
+  }catch{ return null; }
+}
+async function findWorkingBackend(){
+  // Probe candidates in priority order; use the FIRST that responds. This
+  // means a stale localStorage entry (e.g. http://localhost:8787 saved from a
+  // different PC) no longer wedges us -- we fall through to tunnel.json.
+  const lsUrl = (localStorage.getItem('backendUrl')||'').replace(/\/+$/,'');
+  const tunnelUrl = await fetchTunnelJsonUrl();
+  const seen = new Set();
+  const candidates = [];
+  const add=(url,source)=>{ if(url && !seen.has(url)){ seen.add(url); candidates.push({url,source}); } };
+  add(lsUrl,        'localStorage');
+  add(tunnelUrl,    'tunnel.json');
+  add(DEFAULT_BACKEND_URL, 'default');
+
+  let triedLs = false;
+  for(const c of candidates){
+    if(c.source==='localStorage') triedLs = true;
+    const info = await probeOne(c.url);
+    if(!info) continue;
+    BACKEND.url = c.url; BACKEND.urlSource = c.source;
+    BACKEND.info = info; BACKEND.online = true;
+    BACKEND.healthy = !!info?.stockfish?.available;
+    const srcTag = c.source==='tunnel.json'?' • via tunnel.json'
+                 : c.source==='localStorage'?' • user-set'
+                 : ' • default';
+    if(BACKEND.healthy) setBackendChip(`Backend: online • ${info.engine_profile}${srcTag}`,'good');
+    else setBackendChip(`Backend: online but stockfish missing${srcTag}`,'warn');
+    // If we fell back past a stale localStorage entry, clear it so future
+    // loads don't waste a probe on a dead URL.
+    if(triedLs && lsUrl && c.source!=='localStorage'){
+      localStorage.removeItem('backendUrl');
+      console.info(`stale backendUrl=${lsUrl} in localStorage; cleared. Using ${c.url} (${c.source}).`);
     }
-  }catch{}
-  BACKEND.url=DEFAULT_BACKEND_URL;
-  BACKEND.urlSource='default';
-  return BACKEND.url;
+    return;
+  }
+  // Nothing responded.
+  BACKEND.online = false; BACKEND.healthy = false; BACKEND.info = null;
+  BACKEND.url = lsUrl || tunnelUrl || DEFAULT_BACKEND_URL;
+  BACKEND.urlSource = lsUrl?'localStorage':(tunnelUrl?'tunnel.json':'default');
+  setBackendChip(`Backend: offline — tried ${candidates.length} candidate${candidates.length===1?'':'s'}`,'bad');
 }
 const charts={};
 const DRAW_RESULTS=new Set(['agreed','repetition','stalemate','timevsinsufficient','insufficient','50move']);
@@ -541,7 +575,7 @@ async function run(){
   setStatus('Loading...');
   try{
     const preferBackend = (els.preferBackend()?.checked!==false);
-    if(preferBackend){ await probeBackend(); }
+    if(preferBackend){ await findWorkingBackend(); }
     if(preferBackend && BACKEND.healthy){
       await runBackend(user,range,timeClass,limit,token);
     } else {
@@ -571,8 +605,7 @@ if(els.backendConnectBtn()){
   });
 }
 (async()=>{
-  await discoverBackendUrl();
+  await findWorkingBackend();
   if(els.backendUrl()) els.backendUrl().value = BACKEND.url;
-  await probeBackend();
   run();
 })();
