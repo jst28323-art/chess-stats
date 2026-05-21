@@ -3,6 +3,9 @@ backend/data/*.db-wal
 backend/data/*.db-shm
 backend/data/backend.log
 backend/data/backend.pid
+backend/data/tunnel.log
+backend/data/tunnel.pid
+backend/data/tunnel.url
 backend/.venv/
 backend/bin/
 **/__pycache__/

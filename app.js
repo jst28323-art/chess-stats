@@ -1,7 +1,8 @@
 const BASE='https://api.chess.com/pub/player';
 const DEFAULT_BACKEND_URL='http://localhost:8787';
 const BACKEND={
-  url:(localStorage.getItem('backendUrl')||DEFAULT_BACKEND_URL).replace(/\/+$/,''),
+  url:(localStorage.getItem('backendUrl')||'').replace(/\/+$/,''),  // empty = discover via tunnel.json
+  urlSource:'localStorage', // 'localStorage' | 'tunnel.json' | 'default'
   healthy:false,        // probed and stockfish available
   online:false,         // probed and responding (even if stockfish missing)
   info:null,
@@ -10,6 +11,27 @@ const BACKEND={
   jobId:null,
   jobStatus:null,
 };
+async function discoverBackendUrl(){
+  // Resolution order:
+  //  1. localStorage 'backendUrl' (user-set, sticky)
+  //  2. ./tunnel.json from same origin (auto-published by scripts/launch_tunnel.py)
+  //  3. DEFAULT_BACKEND_URL (localhost — only useful when frontend is on same PC)
+  if(BACKEND.url){ BACKEND.urlSource='localStorage'; return BACKEND.url; }
+  try{
+    const r=await fetch('./tunnel.json?ts='+Date.now(),{cache:'no-store'});
+    if(r.ok){
+      const j=await r.json();
+      if(j && j.backendUrl){
+        BACKEND.url = String(j.backendUrl).replace(/\/+$/,'');
+        BACKEND.urlSource='tunnel.json';
+        return BACKEND.url;
+      }
+    }
+  }catch{}
+  BACKEND.url=DEFAULT_BACKEND_URL;
+  BACKEND.urlSource='default';
+  return BACKEND.url;
+}
 const charts={};
 const DRAW_RESULTS=new Set(['agreed','repetition','stalemate','timevsinsufficient','insufficient','50move']);
 const fmtPct=n=>`${(n*100).toFixed(1)}%`;
@@ -78,8 +100,9 @@ async function probeBackend(){
     const info=await r.json();
     BACKEND.info=info; BACKEND.online=true;
     BACKEND.healthy=!!info?.stockfish?.available;
-    if(BACKEND.healthy){ setBackendChip(`Backend: online • ${info.engine_profile}`,'good'); }
-    else { setBackendChip('Backend: online but stockfish missing — see README','warn'); }
+    const srcTag = BACKEND.urlSource==='tunnel.json'?' • via tunnel.json':BACKEND.urlSource==='localStorage'?' • user-set':'';
+    if(BACKEND.healthy){ setBackendChip(`Backend: online • ${info.engine_profile}${srcTag}`,'good'); }
+    else { setBackendChip(`Backend: online but stockfish missing${srcTag}`,'warn'); }
     return info;
   }catch(e){
     BACKEND.online=false; BACKEND.healthy=false; BACKEND.info=null;
@@ -530,10 +553,10 @@ async function run(){
 els.loadBtn().addEventListener('click',run);els.rangeFilter().addEventListener('change',run);els.timeClassFilter().addEventListener('change',run);els.gameCountFilter().addEventListener('change',run);
 
 if(els.backendUrl()){
-  els.backendUrl().value = BACKEND.url || DEFAULT_BACKEND_URL;
   els.backendUrl().addEventListener('change',()=>{
     BACKEND.url = (els.backendUrl().value||DEFAULT_BACKEND_URL).replace(/\/+$/,'');
     localStorage.setItem('backendUrl', BACKEND.url);
+    BACKEND.urlSource='localStorage';
     BACKEND.byUrl.clear(); BACKEND.detailCache.clear();
     probeBackend();
   });
@@ -542,8 +565,14 @@ if(els.backendConnectBtn()){
   els.backendConnectBtn().addEventListener('click',()=>{
     BACKEND.url = (els.backendUrl().value||DEFAULT_BACKEND_URL).replace(/\/+$/,'');
     localStorage.setItem('backendUrl', BACKEND.url);
+    BACKEND.urlSource='localStorage';
     BACKEND.byUrl.clear(); BACKEND.detailCache.clear();
     probeBackend();
   });
 }
-probeBackend().finally(()=>run());
+(async()=>{
+  await discoverBackendUrl();
+  if(els.backendUrl()) els.backendUrl().value = BACKEND.url;
+  await probeBackend();
+  run();
+})();
