@@ -412,7 +412,325 @@ async function analyzeGameDetailed(g,user){
   return rows;
 }
 
-function drawFeedDetails(filtered,pointMap){const done=pointMap.filter(p=>p.myEng!==null&&p.oppEng!==null).length;const fallbackCount=pointMap.filter(p=>p.usedFallback).length;const avgEdge=(pointMap.filter(p=>p.myEng&&p.oppEng).reduce((a,p)=>a+(p.myEng-p.oppEng),0)/(Math.max(1,pointMap.filter(p=>p.myEng&&p.oppEng).length))).toFixed(1);const totalNull=pointMap.reduce((a,p)=>a+(p.nullEvals||0),0);const totalEng=pointMap.reduce((a,p)=>a+(p.engineEvals||0),0);els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div><div class='glass card'><div class='k'>Games Evaluated</div><div class='v'>${done}/${pointMap.length}</div></div><div class='glass card'><div class='k'>Fallback Games</div><div class='v'>${fallbackCount}</div></div><div class='glass card'><div class='k'>Avg Engine Edge</div><div class='v'>${avgEdge}</div></div><div class='glass card'><div class='k'>Engine / Null Positions</div><div class='v'>${totalEng}/${totalNull}</div></div><div class='glass card'><div class='k'>Worker Timeouts</div><div class='v'>${engine.timeouts}</div></div><div class='glass card'><div class='k'>Engine Queue</div><div class='v'>${engine.queue.length}</div></div>`;
+// ===========================================================
+// Coach-style analytics over per-ply evaluations
+// ===========================================================
+const CP_BLUNDER=200, CP_MISTAKE=100, CP_INACC=50, CP_GOOD=15;
+function cpToWinPct(cp){ return 50 + 50*(2/(1+Math.exp(-0.00368208*cp)) - 1); }
+function _moveAcc(winBefore, winAfter, isMoverWhite){
+  const drop = isMoverWhite ? (winBefore - winAfter) : (winAfter - winBefore);
+  const d = Math.max(0, drop);
+  return Math.max(0, Math.min(100, 103.1668*Math.exp(-0.04354*d) - 3.1668));
+}
+function _classify(cpLoss){
+  if(cpLoss >= CP_BLUNDER) return 'blunder';
+  if(cpLoss >= CP_MISTAKE) return 'mistake';
+  if(cpLoss >= CP_INACC) return 'inaccuracy';
+  if(cpLoss >= CP_GOOD) return 'good';
+  return 'best';
+}
+function analyzeEvals(evals, meWhite){
+  if(!Array.isArray(evals) || evals.length < 2) return null;
+  const a = {
+    accuracy:{me:null,opp:null},
+    classifications:{me:{best:0,good:0,inaccuracy:0,mistake:0,blunder:0},opp:{best:0,good:0,inaccuracy:0,mistake:0,blunder:0}},
+    phases:{opening:{meLoss:0,meN:0,oppLoss:0,oppN:0},middlegame:{meLoss:0,meN:0,oppLoss:0,oppN:0},endgame:{meLoss:0,meN:0,oppLoss:0,oppN:0}},
+    biggestMyLoss:0, biggestMyLossPly:null, firstBlunderPly:null,
+  };
+  let prev=evals[0], prevWin=cpToWinPct(prev);
+  let myAccSum=0,myAccN=0,oppAccSum=0,oppAccN=0;
+  for(let i=1;i<evals.length;i++){
+    const cp=evals[i], win=cpToWinPct(cp);
+    const whiteMove=((i-1)%2===0);
+    const meMoved=(meWhite&&whiteMove)||(!meWhite&&!whiteMove);
+    const loss = whiteMove ? Math.max(0, prev-cp) : Math.max(0, cp-prev);
+    const phase = i<=20?'opening':i<=50?'middlegame':'endgame';
+    if(meMoved){
+      const acc=_moveAcc(prevWin,win,meWhite); myAccSum+=acc; myAccN++;
+      a.classifications.me[_classify(loss)]++;
+      a.phases[phase].meLoss+=loss; a.phases[phase].meN++;
+      if(loss>a.biggestMyLoss){ a.biggestMyLoss=loss; a.biggestMyLossPly=i; }
+      if(a.firstBlunderPly===null && loss>=CP_BLUNDER) a.firstBlunderPly=i;
+    } else {
+      const acc=_moveAcc(prevWin,win,!meWhite); oppAccSum+=acc; oppAccN++;
+      a.classifications.opp[_classify(loss)]++;
+      a.phases[phase].oppLoss+=loss; a.phases[phase].oppN++;
+    }
+    prev=cp; prevWin=win;
+  }
+  a.accuracy.me = myAccN?myAccSum/myAccN:null;
+  a.accuracy.opp = oppAccN?oppAccSum/oppAccN:null;
+  return a;
+}
+
+function aggregateInsights(filtered, points, user){
+  const perGame = points.map((p,i)=>{
+    const g=filtered[i], persp=perspective(g,user);
+    return {gameIdx:i, game:g, point:p, persp, analytics:analyzeEvals(p.evals, persp.meWhite)};
+  });
+  const valid = perGame.filter(v=>v.analytics);
+  if(!valid.length) return null;
+  const myCls={best:0,good:0,inaccuracy:0,mistake:0,blunder:0}, oppCls={...myCls};
+  for(const v of valid){ for(const k of Object.keys(myCls)){ myCls[k]+=v.analytics.classifications.me[k]; oppCls[k]+=v.analytics.classifications.opp[k]; } }
+  const myTotal = Object.values(myCls).reduce((a,b)=>a+b,0);
+  const phases = {opening:{me:0,meN:0,opp:0,oppN:0},middlegame:{me:0,meN:0,opp:0,oppN:0},endgame:{me:0,meN:0,opp:0,oppN:0}};
+  for(const v of valid){ for(const ph of Object.keys(phases)){ phases[ph].me+=v.analytics.phases[ph].meLoss; phases[ph].meN+=v.analytics.phases[ph].meN; phases[ph].opp+=v.analytics.phases[ph].oppLoss; phases[ph].oppN+=v.analytics.phases[ph].oppN; } }
+  // conversion / resilience at move ~20 (ply 40)
+  let leadingN=0,leadingWins=0,losingN=0,losingSaves=0;
+  for(const v of valid){
+    const e=v.point.evals||[]; if(e.length<21) continue;
+    const at=Math.min(40,e.length-1); const cp=e[at]; const mc=v.persp.meWhite?cp:-cp;
+    if(mc>=200){ leadingN++; if(v.persp.outcome==='Win') leadingWins++; }
+    else if(mc<=-200){ losingN++; if(v.persp.outcome!=='Loss') losingSaves++; }
+  }
+  // top blunders
+  const topBlunders = valid.filter(v=>v.analytics.biggestMyLoss>=CP_BLUNDER)
+    .map(v=>({gameIdx:v.gameIdx, ply:v.analytics.biggestMyLossPly, cpLoss:v.analytics.biggestMyLoss,
+              date:v.game.end_time, outcome:v.persp.outcome, opp:(v.persp.opp&&v.persp.opp.username)||v.game.opp_user||'?'}))
+    .sort((a,b)=>b.cpLoss-a.cpLoss).slice(0,5);
+  // tilt
+  const tilt={afterLoss:{n:0,sum:0},afterWin:{n:0,sum:0},afterDraw:{n:0,sum:0}};
+  for(let i=1;i<valid.length;i++){
+    const po=valid[i-1].persp.outcome, ma=valid[i].analytics.accuracy.me;
+    if(ma==null) continue;
+    if(po==='Loss'){ tilt.afterLoss.n++; tilt.afterLoss.sum+=ma; }
+    else if(po==='Win'){ tilt.afterWin.n++; tilt.afterWin.sum+=ma; }
+    else { tilt.afterDraw.n++; tilt.afterDraw.sum+=ma; }
+  }
+  // by color
+  const w={n:0,wins:0,draws:0,losses:0,accSum:0,accN:0}, b={...w,accSum:0,accN:0};
+  for(const v of valid){
+    const k=v.persp.meWhite?w:b; k.n++;
+    if(v.persp.outcome==='Win') k.wins++; else if(v.persp.outcome==='Draw') k.draws++; else k.losses++;
+    if(v.analytics.accuracy.me!=null){ k.accSum+=v.analytics.accuracy.me; k.accN++; }
+  }
+  // weekday / hour
+  const weekdayStats=Array.from({length:7},()=>({n:0,wins:0,accSum:0,accN:0}));
+  const hourStats=Array.from({length:24},()=>({n:0,wins:0,accSum:0,accN:0}));
+  for(const v of valid){
+    const d=new Date(v.game.end_time*1000), wd=d.getDay(), hr=d.getHours();
+    weekdayStats[wd].n++; hourStats[hr].n++;
+    if(v.persp.outcome==='Win'){ weekdayStats[wd].wins++; hourStats[hr].wins++; }
+    if(v.analytics.accuracy.me!=null){ weekdayStats[wd].accSum+=v.analytics.accuracy.me; weekdayStats[wd].accN++; hourStats[hr].accSum+=v.analytics.accuracy.me; hourStats[hr].accN++; }
+  }
+  // by time control
+  const byTimeControl=new Map();
+  for(const v of valid){
+    const tc=v.game.time_class||'?';
+    if(!byTimeControl.has(tc)) byTimeControl.set(tc,{n:0,wins:0,draws:0,losses:0,accSum:0,accN:0,blun:0,plays:0});
+    const b2=byTimeControl.get(tc); b2.n++;
+    if(v.persp.outcome==='Win') b2.wins++; else if(v.persp.outcome==='Draw') b2.draws++; else b2.losses++;
+    if(v.analytics.accuracy.me!=null){ b2.accSum+=v.analytics.accuracy.me; b2.accN++; }
+    b2.blun+=v.analytics.classifications.me.blunder;
+    b2.plays+=Object.values(v.analytics.classifications.me).reduce((a,c)=>a+c,0);
+  }
+  const myAccs=valid.map(x=>x.analytics.accuracy.me).filter(v=>v!=null);
+  const oppAccs=valid.map(x=>x.analytics.accuracy.opp).filter(v=>v!=null);
+  return {
+    perGame, valid,
+    avgMyAccuracy: myAccs.length?myAccs.reduce((a,b)=>a+b,0)/myAccs.length:null,
+    avgOppAccuracy: oppAccs.length?oppAccs.reduce((a,b)=>a+b,0)/oppAccs.length:null,
+    myClassifications:myCls, oppClassifications:oppCls, myMoveTotal:myTotal,
+    phases, conversion:{leadingN,leadingWins,losingN,losingSaves},
+    topBlunders, tilt, byColor:{white:w,black:b},
+    weekdayStats, hourStats, byTimeControl,
+  };
+}
+
+function generateCoachNotes(ins){
+  if(!ins) return [];
+  const n=[];
+  const acc=ins.avgMyAccuracy;
+  if(acc!=null){
+    if(acc>=85) n.push(`Excellent accuracy at ${acc.toFixed(1)}% — you're consistently finding strong moves. Focus your study on the few decisive moments per game.`);
+    else if(acc>=75) n.push(`Solid accuracy ${acc.toFixed(1)}%. The next gain is converting "good" moves into "best" via slower critical-position review.`);
+    else if(acc>=65) n.push(`Accuracy ${acc.toFixed(1)}%. Reducing blunders is the highest-leverage fix — drill tactics + 1-move blunder-check on every move.`);
+    else n.push(`Accuracy ${acc.toFixed(1)}% suggests frequent tactical leaks. Slow the time control if possible and add a deliberate blunder-check.`);
+  }
+  const ph=ins.phases;
+  const phAvg={opening:ph.opening.meN?ph.opening.me/ph.opening.meN:0, middlegame:ph.middlegame.meN?ph.middlegame.me/ph.middlegame.meN:0, endgame:ph.endgame.meN?ph.endgame.me/ph.endgame.meN:0};
+  const wp=Object.entries(phAvg).reduce((a,b)=>b[1]>a[1]?b:a, ['none',0]);
+  if(wp[1]>25){
+    const advice = wp[0]==='opening' ? 'sharpen your opening repertoire and book moves'
+                 : wp[0]==='middlegame' ? 'work tactics puzzles and study typical plans for the pawn structures you play'
+                 : 'drill K+P, R+P, and basic theoretical endgames; learn opposition and key squares';
+    n.push(`Weakest phase: ${wp[0]} — averaging ${wp[1].toFixed(0)} cp lost per move. To fix: ${advice}.`);
+  }
+  const c=ins.conversion;
+  if(c.leadingN>=3){
+    const r=c.leadingWins/c.leadingN*100;
+    if(r<60) n.push(`Conversion leak: when up ≥2 pawns at move 20, you only win ${r.toFixed(0)}% (${c.leadingWins}/${c.leadingN}). Practice technical endgames vs liquidation to a known win.`);
+    else if(r>85) n.push(`Strong technique — converts ${r.toFixed(0)}% of winning positions (${c.leadingWins}/${c.leadingN}).`);
+  }
+  if(c.losingN>=3){
+    const r=c.losingSaves/c.losingN*100;
+    if(r>35) n.push(`Resilient defender — saves ${r.toFixed(0)}% of losing positions (${c.losingSaves}/${c.losingN}). Good defensive practice.`);
+    else if(r<10 && c.losingN>=5) n.push(`Losing positions stay lost (${r.toFixed(0)}% saves). Try complicating earlier with sacs / counterplay rather than passive defence.`);
+  }
+  const t=ins.tilt;
+  if(t.afterLoss.n>=3 && t.afterWin.n>=3){
+    const aL=t.afterLoss.sum/t.afterLoss.n, aW=t.afterWin.sum/t.afterWin.n;
+    if(aW-aL>4) n.push(`Tilt signal: accuracy drops from ${aW.toFixed(1)}% after wins to ${aL.toFixed(1)}% after losses (Δ${(aW-aL).toFixed(1)}). Consider stopping after 2 consecutive losses.`);
+  }
+  const wc=ins.byColor.white, bc=ins.byColor.black;
+  if(wc.n>=3 && bc.n>=3){
+    const wr=wc.wins/wc.n, br=bc.wins/bc.n;
+    if(Math.abs(wr-br)>0.15){
+      const weak=wr>br?'black':'white';
+      n.push(`Color split: ${(wr*100).toFixed(0)}% as white vs ${(br*100).toFixed(0)}% as black. Your ${weak} repertoire is the weak link.`);
+    }
+  }
+  if(ins.myMoveTotal>0){
+    const br=ins.myClassifications.blunder/ins.myMoveTotal*100;
+    if(br>4) n.push(`Blunder rate ${br.toFixed(1)}% (one every ${Math.round(ins.myMoveTotal/Math.max(1,ins.myClassifications.blunder))} moves). This single metric is your highest-leverage improvement target.`);
+    else if(br<1.5) n.push(`Low blunder rate (${br.toFixed(1)}%). Remaining gains will come from "good→best" upgrades in critical positions.`);
+  }
+  if(ins.topBlunders.length){
+    const tb=ins.topBlunders[0];
+    n.push(`Worst single move cost ${tb.cpLoss} cp vs ${tb.opp} (${tb.outcome}). Click "Top blunders" below to review.`);
+  }
+  return n;
+}
+
+// ---- Renderers ----
+function fmtAcc(v){ return v==null?'—':`${v.toFixed(1)}%`; }
+function renderInsightsKpis(ins){
+  if(!ins){ els.advancedKpis().innerHTML='<div class="sub" style="padding:14px">Insights will appear once games finish analyzing.</div>'; return; }
+  const cl=ins.myClassifications, t=ins.myMoveTotal||1, c=ins.conversion;
+  const w=ins.byColor.white, b=ins.byColor.black;
+  const pct=(a,total)=>total>0?`${(a/total*100).toFixed(1)}%`:'—';
+  const cards=[
+    ['Your accuracy', fmtAcc(ins.avgMyAccuracy)],
+    ['Opp accuracy', fmtAcc(ins.avgOppAccuracy)],
+    ['Blunder rate', pct(cl.blunder,t)],
+    ['Mistake rate', pct(cl.mistake,t)],
+    ['Conversion (≥+2 @ 20)', c.leadingN?`${(c.leadingWins/c.leadingN*100).toFixed(0)}%  (${c.leadingWins}/${c.leadingN})`:'—'],
+    ['Resilience (≤−2 @ 20)', c.losingN?`${(c.losingSaves/c.losingN*100).toFixed(0)}%  (${c.losingSaves}/${c.losingN})`:'—'],
+    ['As white  W/D/L', w.n?`${w.wins}/${w.draws}/${w.losses}  ·  ${(w.wins/w.n*100).toFixed(0)}%`:'—'],
+    ['As black  W/D/L', b.n?`${b.wins}/${b.draws}/${b.losses}  ·  ${(b.wins/b.n*100).toFixed(0)}%`:'—'],
+  ];
+  els.advancedKpis().innerHTML=cards.map(([k,v])=>`<div class='glass card'><div class='k'>${k}</div><div class='v' style='font-size:20px'>${v}</div></div>`).join('');
+}
+function drawAccuracyTrend(ins){
+  const labels=ins.valid.map((_,i)=>`#${i+1}`);
+  const my=ins.valid.map(v=>v.analytics.accuracy.me);
+  const opp=ins.valid.map(v=>v.analytics.accuracy.opp);
+  charts.accTrend?.destroy?.();
+  charts.accTrend=makeLineChart(document.getElementById('accuracyTrendChart'),{
+    type:'line', data:{labels, datasets:[
+      {label:'Your accuracy %', data:my, borderColor:'#0071e3', tension:0.2},
+      {label:'Opp accuracy %', data:opp, borderColor:'#8e8e93', borderDash:[4,4], tension:0.2},
+    ]},
+    options:{plugins:{title:{display:true,text:'Per-game accuracy %'}},scales:{y:{min:0,max:100,title:{display:true,text:'Accuracy %'}}}}
+  });
+}
+function drawPhaseMistakes(ins){
+  const k=['opening','middlegame','endgame'];
+  const me=k.map(x=>ins.phases[x].meN?ins.phases[x].me/ins.phases[x].meN:0);
+  const op=k.map(x=>ins.phases[x].oppN?ins.phases[x].opp/ins.phases[x].oppN:0);
+  charts.phase?.destroy?.();
+  charts.phase=new Chart(document.getElementById('phaseMistakeChart'),{
+    type:'bar', data:{labels:['Opening (1-20)','Middlegame (21-50)','Endgame (51+)'],datasets:[
+      {label:'You — cp lost / move', data:me, backgroundColor:'#b42318'},
+      {label:'Opp — cp lost / move', data:op, backgroundColor:'#a0a0a0'},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Average centipawn loss per move by phase'}},scales:{y:{title:{display:true,text:'Cp lost / move'}}}}
+  });
+}
+function drawMoveClassChart(ins){
+  const cl=ins.myClassifications, op=ins.oppClassifications;
+  const labels=['Best','Good','Inaccuracy','Mistake','Blunder'];
+  const me=[cl.best,cl.good,cl.inaccuracy,cl.mistake,cl.blunder];
+  const oo=[op.best,op.good,op.inaccuracy,op.mistake,op.blunder];
+  charts.moveClass?.destroy?.();
+  charts.moveClass=new Chart(document.getElementById('moveClassChart'),{
+    type:'bar', data:{labels, datasets:[
+      {label:'You', data:me, backgroundColor:['#1a7f37','#86c876','#175cd3','#b54708','#b42318']},
+      {label:'Opp', data:oo, backgroundColor:'rgba(140,140,140,.55)'},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Move classification distribution'},legend:{position:'top'}},scales:{y:{title:{display:true,text:'Move count'}}}}
+  });
+}
+function drawWeekdayChart(ins){
+  const N=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const ws=ins.weekdayStats;
+  charts.weekday?.destroy?.();
+  charts.weekday=new Chart(document.getElementById('weekdayChart'),{
+    data:{labels:N, datasets:[
+      {type:'bar', label:'Games', data:ws.map(d=>d.n), backgroundColor:'#cfe2ff', yAxisID:'yG'},
+      {type:'line', label:'Win %', data:ws.map(d=>d.n?(d.wins/d.n*100):0), borderColor:'#1a7f37', yAxisID:'yW', tension:0.2},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Games & win rate by weekday'}},scales:{yG:{type:'linear',position:'left',title:{display:true,text:'Games'}},yW:{type:'linear',position:'right',min:0,max:100,title:{display:true,text:'Win %'},grid:{drawOnChartArea:false}}}}
+  });
+}
+function drawHourChart(ins){
+  const hs=ins.hourStats;
+  charts.hour?.destroy?.();
+  charts.hour=new Chart(document.getElementById('hourChart'),{
+    data:{labels:hs.map((_,i)=>`${i}h`), datasets:[
+      {type:'bar', label:'Games', data:hs.map(d=>d.n), backgroundColor:'#fde0c2', yAxisID:'yG'},
+      {type:'line', label:'Win %', data:hs.map(d=>d.n?(d.wins/d.n*100):0), borderColor:'#1a7f37', yAxisID:'yW', tension:0.2},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Games & win rate by hour (local time)'}},scales:{yG:{type:'linear',position:'left',title:{display:true,text:'Games'}},yW:{type:'linear',position:'right',min:0,max:100,title:{display:true,text:'Win %'},grid:{drawOnChartArea:false}}}}
+  });
+}
+function drawConversionChart(ins){
+  const c=ins.conversion;
+  const conv = c.leadingN?(c.leadingWins/c.leadingN*100):0;
+  const res = c.losingN?(c.losingSaves/c.losingN*100):0;
+  charts.conv?.destroy?.();
+  charts.conv=new Chart(document.getElementById('conversionChart'),{
+    type:'bar', data:{labels:['Conversion (≥+2)','Resilience (≤-2)'],datasets:[
+      {label:'Rate %', data:[conv,res], backgroundColor:['#1a7f37','#175cd3']},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Conversion & resilience at move 20'},legend:{display:false}},scales:{y:{min:0,max:100,title:{display:true,text:'%'}}}}
+  });
+}
+function renderTimeControlTable(ins){
+  const m=ins.byTimeControl; const t=document.getElementById('timeControlTable'); if(!t) return;
+  if(!m || !m.size){ t.innerHTML='<tr><td>No data</td></tr>'; return; }
+  const rows=['<tr><th>Time class</th><th>Games</th><th>W/D/L</th><th>Win %</th><th>Avg accuracy</th><th>Blunder rate</th></tr>'];
+  for(const [tc,b] of m){
+    rows.push(`<tr><td>${tc}</td><td>${b.n}</td><td>${b.wins}/${b.draws}/${b.losses}</td><td>${(b.wins/b.n*100).toFixed(0)}%</td><td>${b.accN?(b.accSum/b.accN).toFixed(1)+'%':'—'}</td><td>${b.plays?(b.blun/b.plays*100).toFixed(2)+'%':'—'}</td></tr>`);
+  }
+  t.innerHTML=rows.join('');
+}
+function renderCoachNotes(ins){
+  const el=document.getElementById('coachNotes'); if(!el) return;
+  const notes=generateCoachNotes(ins);
+  if(!notes.length){ el.innerHTML='<div class="sub" style="padding:14px">Coach insights will appear here once games finish analyzing.</div>'; return; }
+  el.innerHTML=`<div style="padding:14px"><div class='k' style='margin-bottom:8px'>Coach’s notes</div><ul style="margin:0;padding-left:18px;font-size:14px">${notes.map(n=>`<li style="margin:6px 0;line-height:1.4">${n}</li>`).join('')}</ul></div>`;
+}
+function renderTopBlunders(ins){
+  const el=document.getElementById('topBlunders'); if(!el) return;
+  if(!ins || !ins.topBlunders.length){ el.innerHTML='<div class="sub" style="padding:14px">No blunders flagged in this sample.</div>'; return; }
+  const rows=ins.topBlunders.map(tb=>{
+    const d=new Date(tb.date*1000).toISOString().slice(0,10);
+    return `<button class='game-row' data-blunder-idx='${tb.gameIdx}' style='grid-template-columns:90px 64px 1fr 60px 92px'><span>${d}</span><span>Ply ${tb.ply}</span><span>vs ${tb.opp}</span><span class='${tb.outcome.toLowerCase()}'>${tb.outcome}</span><span class='tag blun'>−${tb.cpLoss} cp</span></button>`;
+  });
+  el.innerHTML=`<div style="padding:14px"><div class='k' style='margin-bottom:8px'>Top 5 blunders</div>${rows.join('')}</div>`;
+  el.querySelectorAll('[data-blunder-idx]').forEach(btn=>btn.addEventListener('click',()=>{
+    const idx=Number(btn.dataset.blunderIdx);
+    const feedBtns=document.querySelectorAll('#gamesFeed .game-row');
+    const target=feedBtns[idx];
+    if(target){ target.scrollIntoView({behavior:'smooth',block:'center'}); target.click(); }
+  }));
+}
+
+function drawFeedDetails(filtered,pointMap){
+  const ins = aggregateInsights(filtered, pointMap, current.user);
+  renderInsightsKpis(ins);
+  if(ins){
+    drawAccuracyTrend(ins);
+    drawPhaseMistakes(ins);
+    drawMoveClassChart(ins);
+    drawWeekdayChart(ins);
+    drawHourChart(ins);
+    drawConversionChart(ins);
+    renderTimeControlTable(ins);
+    renderCoachNotes(ins);
+    renderTopBlunders(ins);
+  }
   els.gameDetails().innerHTML='<div class="sub">Click a game row to open move-by-move eval chart.</div>';
   document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',async()=>{
     const i=Number(btn.dataset.idx); const p=pointMap[i];
