@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Insights+ Pro Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <style>
+    :root {
+      --bg:#f5f5f7; --panel:rgba(255,255,255,.74); --panel-solid:#fff; --text:#1d1d1f; --muted:#6e6e73;
+      --line:rgba(0,0,0,.08); --accent:#0071e3; --good:#1a7f37; --bad:#b42318; --warn:#b54708;
+      --radius:20px; --shadow:0 10px 30px rgba(0,0,0,.08);
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; color:var(--text);
+      font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue",Helvetica,Arial,sans-serif;
+      background:linear-gradient(180deg,#fbfbfd 0%,#f5f5f7 55%,#eef1f6 100%);
+      letter-spacing:-0.01em;
+    }
+    .wrap{max-width:1320px; margin:0 auto; padding:28px 18px 44px}
+    .hero{padding:20px 10px 24px}
+    h1{margin:0; font-size:42px; line-height:1.06; font-weight:700; letter-spacing:-.03em}
+    .sub{color:var(--muted)}
+    .toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+    input,button,select{
+      padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:var(--panel-solid); color:var(--text);
+      font-size:14px; backdrop-filter:saturate(180%) blur(18px);
+    }
+    input,select{min-height:44px}
+    button{background:var(--accent); color:#fff; border:none; font-weight:600; box-shadow:0 6px 18px rgba(0,113,227,.32)}
+    button:hover{filter:brightness(1.03)}
+    .glass{background:var(--panel); backdrop-filter:saturate(180%) blur(24px); border:1px solid var(--line); box-shadow:var(--shadow); border-radius:var(--radius)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:16px}
+    .card{padding:16px}
+    .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+    .v{font-size:24px;font-weight:650; margin-top:6px}
+    .section{margin-top:18px}
+    .section h3{font-size:24px;letter-spacing:-.02em;margin:10px 4px}
+    .charts,.charts2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+    .chart-card{height:320px;background:var(--panel-solid); border:1px solid var(--line); border-radius:16px; padding:10px;box-shadow:inset 0 1px 0 rgba(255,255,255,.6)}
+canvas{width:100% !important;height:100% !important;}
+    .table-wrap,.feed,.details{padding:14px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left}
+    th{color:var(--muted);font-weight:600}
+    .two-col{display:grid;grid-template-columns:1fr 1.2fr;gap:14px}
+    .game-row{display:grid;grid-template-columns:95px 70px 1fr 60px 76px;gap:8px;width:100%;text-align:left;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px}
+    .game-row:hover{border-color:rgba(0,113,227,.45); box-shadow:0 4px 14px rgba(0,113,227,.14)}
+    .win{color:var(--good)} .loss{color:var(--bad)} .draw{color:#475467}
+    .tag{font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+    .best{color:var(--good)} .inacc{color:#175cd3} .mist{color:var(--warn)} .blun{color:var(--bad)}
+    @media (max-width:980px){ .two-col{grid-template-columns:1fr} h1{font-size:34px} }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <h1>Chess Insights+</h1>
+    <p class="sub">Premium-style analytics for your Chess.com profile, with beautiful, fast, on-device engine analysis.</p>
+    <div class="toolbar">
+      <input id="username" value="jst28323" />
+      <select id="rangeFilter"><option value="all">All time</option><option value="24h">Last 24h</option><option value="7d">Last 7d</option><option value="30d">Last 30d</option><option value="90d">Last 90d</option></select>
+      <select id="timeClassFilter"><option value="all">All types</option><option value="bullet">Bullet</option><option value="blitz">Blitz</option><option value="rapid">Rapid</option><option value="daily">Daily</option></select>
+      <select id="gameCountFilter"><option value="50">Last 50 games</option><option value="100" selected>Last 100 games</option><option value="250">Last 250 games</option><option value="500">Last 500 games</option></select>
+      <button id="loadBtn">Update Dashboard</button>
+      <span id="status" class="sub"></span><span id="buildStamp" class="sub" style="margin-left:8px">Build 2026-05-21.2</span><span id="engineDiag" class="sub" style="margin-left:8px">Engine: init</span>
+    </div>
+  </div>
+
+  <div class="grid" id="kpis"></div>
+
+  <section class="section">
+    <h3>Performance Trends</h3>
+    <div class="charts"><div class="chart-card"><canvas id="ratingChart"></canvas></div><div class="chart-card"><canvas id="volumeChart"></canvas></div><div class="chart-card"><canvas id="resultChart"></canvas></div><div class="chart-card"><canvas id="oppRatingChart"></canvas></div></div>
+  </section>
+
+  <section class="section">
+    <h3>Advanced Insights</h3>
+    <div class="grid" id="advancedKpis"></div>
+    <div class="charts2"><div class="chart-card"><canvas id="accuracyTrendChart"></canvas></div><div class="chart-card"><canvas id="phaseMistakeChart"></canvas></div><div class="chart-card"><canvas id="weekdayChart"></canvas></div><div class="chart-card"><canvas id="hourChart"></canvas></div></div>
+  </section>
+
+  <section class="section">
+    <h3>By Time Control</h3>
+    <div class="glass table-wrap"><table id="timeControlTable"></table></div>
+  </section>
+
+  <section class="section">
+    <h3>Game Feed <span id="feedCount" class="sub"></span></h3>
+    <div class="two-col">
+      <div class="glass feed" id="gamesFeed"></div>
+      <div class="glass details" id="gameDetails"><div class="sub">Select a game for full engine report.</div></div>
+    </div>
+  </section>
+</div>
+<script src="app.js?v=2026-05-21.2"></script>
+</body>
+</html>
