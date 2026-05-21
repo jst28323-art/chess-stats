@@ -5,8 +5,9 @@ const fmtPct=n=>`${(n*100).toFixed(1)}%`;
 const daysAgoTs=d=>Math.floor((Date.now()-d*86400000)/1000);
 const getFilterStart=f=>f==='24h'?daysAgoTs(1):f==='7d'?daysAgoTs(7):f==='30d'?daysAgoTs(30):f==='90d'?daysAgoTs(90):0;
 const parseMoves=pgn=>(pgn||'').replace(/\{[^}]*\}|\([^)]*\)|\[[^\]]*\]|\d+\.(\.\.)?|\$\d+|1-0|0-1|1\/2-1\/2|\*/g,' ').trim().split(/\s+/).filter(Boolean);
-const EVAL_DEPTH=10;
-const POSITION_TIMEOUT_MS=15000;
+const EVAL_DEPTH=8;
+const POSITION_TIMEOUT_MS=4000;
+const ENGINE_MOVE_MS=180;
 const MAX_MOVES_PER_GAME=300;
 const MAX_MS_PER_GAME=900000;
 
@@ -24,7 +25,7 @@ function renderFenBoard(fen){
   html+='</div>'; return html;
 }
 
-const ENGINE_PROFILE=`d${EVAL_DEPTH}_pt${POSITION_TIMEOUT_MS}_mm${MAX_MOVES_PER_GAME}_mg${MAX_MS_PER_GAME}_v1`;
+const ENGINE_PROFILE=`d${EVAL_DEPTH}_mt${ENGINE_MOVE_MS}_pt${POSITION_TIMEOUT_MS}_mm${MAX_MOVES_PER_GAME}_mg${MAX_MS_PER_GAME}_v2`;
 
 const els={
   username:()=>document.getElementById('username'),
@@ -119,9 +120,9 @@ function parseScore(info){
 function dispatchNextEngineRequest(){
   if(engine.fallback || !engine.ready || !engine.w || engine.pending || !engine.queue.length) return;
   const req=engine.queue.shift();
-  engine.pending={...req,lastInfo:'',lastPv:'',timer:setTimeout(()=>{engine.timeouts++; cleanupPendingAsNull(); dispatchNextEngineRequest();},POSITION_TIMEOUT_MS)};
+  engine.pending={...req,lastInfo:'',lastPv:'',timer:setTimeout(()=>{engine.timeouts++; try{engine.w&&engine.w.postMessage('stop');}catch{} cleanupPendingAsNull(); dispatchNextEngineRequest();},POSITION_TIMEOUT_MS)};
   engine.w.postMessage(`position fen ${req.fen}`);
-  engine.w.postMessage(`go depth ${req.depth}`);
+  engine.w.postMessage(`go movetime ${req.movetime||ENGINE_MOVE_MS}`);
 }
 
 async function evalFen(fen, depth=EVAL_DEPTH){
@@ -133,7 +134,7 @@ async function evalFen(fen, depth=EVAL_DEPTH){
   }
   if(engine.fallback||!engine.w) return null;
   return new Promise(resolve=>{
-    engine.queue.push({fen,depth,resolve});
+    engine.queue.push({fen,depth,movetime:ENGINE_MOVE_MS,resolve});
     dispatchNextEngineRequest();
   });
 }
@@ -159,12 +160,12 @@ function perspective(g,u){const meWhite=g.white.username?.toLowerCase()===u.toLo
 function filterGames(games,user,range,timeClass,limit){const start=getFilterStart(range);return games.filter(g=>g.rated&&g.time_class&&g.end_time>=start&&(timeClass==='all'||g.time_class===timeClass)&&((g.white.username||'').toLowerCase()===user.toLowerCase()||(g.black.username||'').toLowerCase()===user.toLowerCase())).sort((a,b)=>a.end_time-b.end_time).slice(-limit);} 
 
 const evalCache=new Map();
-function saveCache(){localStorage.setItem('engineEvalCacheV5',JSON.stringify([...evalCache.entries()]));}
-function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV5'); if(raw) for(const [k,v] of JSON.parse(raw)) evalCache.set(k,v);}catch{}}
+function saveCache(){localStorage.setItem('engineEvalCacheV6',JSON.stringify([...evalCache.entries()]));}
+function loadCache(){try{const raw=localStorage.getItem('engineEvalCacheV6'); if(raw) for(const [k,v] of JSON.parse(raw)) evalCache.set(k,v);}catch{}}
 loadCache();
 
 async function evaluateGameMoveByMove(g,user,onProgress){
-  const key=(g.url||'')+`:moveByMove:${ENGINE_PROFILE}:v5`;
+  const key=(g.url||'')+`:moveByMove:${ENGINE_PROFILE}:v6`;
   if(evalCache.has(key)) return evalCache.get(key);
   const {meWhite,res}=perspective(g,user);
   const moves=parseMoves(g.pgn);
@@ -197,7 +198,7 @@ async function evaluateGameMoveByMove(g,user,onProgress){
     myErr=base + (res==='win'?-18:res==='timeout'?18:0); oppErr=base + (res==='win'?18:-10); myN=oppN=1;
   }
   const toElo=err=>Math.max(500,Math.min(2900,2550-err*3.1));
-  let lowConfidence = engineEvals < Math.max(3, Math.floor((myN+oppN)*0.15));
+  let lowConfidence = engineEvals < Math.max(2, Math.floor((myN+oppN)*0.08));
   if(lowConfidence && !engine.fallback){
     // second pass on sparse positions for better confidence
     const chess2=new ChessCtor();
