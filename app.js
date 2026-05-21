@@ -677,13 +677,39 @@ function aggregateInsights(filtered, points, user){
   const myTotal = Object.values(myCls).reduce((a,b)=>a+b,0);
   const phases = {opening:{me:0,meN:0,opp:0,oppN:0},middlegame:{me:0,meN:0,opp:0,oppN:0},endgame:{me:0,meN:0,opp:0,oppN:0}};
   for(const v of valid){ for(const ph of Object.keys(phases)){ phases[ph].me+=v.analytics.phases[ph].meLoss; phases[ph].meN+=v.analytics.phases[ph].meN; phases[ph].opp+=v.analytics.phases[ph].oppLoss; phases[ph].oppN+=v.analytics.phases[ph].oppN; } }
-  // conversion / resilience at move ~20 (ply 40)
+  // conversion / resilience at move ~20 (ply 40) -- single-snapshot KPI
   let leadingN=0,leadingWins=0,losingN=0,losingSaves=0;
   for(const v of valid){
     const e=v.point.evals||[]; if(e.length<21) continue;
     const at=Math.min(40,e.length-1); const cp=e[at]; const mc=v.persp.meWhite?cp:-cp;
     if(mc>=200){ leadingN++; if(v.persp.outcome==='Win') leadingWins++; }
     else if(mc<=-200){ losingN++; if(v.persp.outcome!=='Loss') losingSaves++; }
+  }
+  // conversion / resilience tracked across every ply (for the line chart):
+  //   leadingN[p]    = games where me-eval at ply p was >= +200
+  //   leadingWins[p] = of those, how many ended in Win
+  //   losingN[p]     = games where me-eval at ply p was <= -200
+  //   losingSaves[p] = of those, how many ended Win|Draw
+  const MAX_PLY = 200;
+  const byPly = Array.from({length:MAX_PLY+1}, ()=>({leadingN:0, leadingWins:0, losingN:0, losingSaves:0}));
+  for(const v of valid){
+    const evals = v.point.evals || [];
+    const meWhite = v.persp.meWhite;
+    const isWin = v.persp.outcome === 'Win';
+    const isSave = isWin || v.persp.outcome === 'Draw';
+    const upTo = Math.min(evals.length, MAX_PLY + 1);
+    for(let p=1; p<upTo; p++){
+      const cp = evals[p];
+      if(cp == null) continue;
+      const mc = meWhite ? cp : -cp;
+      if(mc >= 200){
+        byPly[p].leadingN++;
+        if(isWin) byPly[p].leadingWins++;
+      } else if(mc <= -200){
+        byPly[p].losingN++;
+        if(isSave) byPly[p].losingSaves++;
+      }
+    }
   }
   // top blunders
   const topBlunders = valid.filter(v=>v.analytics.biggestMyLoss>=CP_BLUNDER)
@@ -744,6 +770,7 @@ function aggregateInsights(filtered, points, user){
     topBlunders, tilt, byColor:{white:w,black:b},
     weekdayStats, hourStats, byTimeControl,
     competitivePlies: totalCompetitive, decidedPlies: totalDecided,
+    conversionByPly: byPly,
   };
 }
 
@@ -886,15 +913,41 @@ function drawHourChart(ins){
   });
 }
 function drawConversionChart(ins){
-  const c=ins.conversion;
-  const conv = c.leadingN?(c.leadingWins/c.leadingN*100):0;
-  const res = c.losingN?(c.losingSaves/c.losingN*100):0;
+  // Plot conversion / resilience as lines across every ply, with the data
+  // gated on a minimum sample size so noisy tail-of-game plies don't dominate.
+  const MIN_SAMPLE = 3;
+  const series = ins.conversionByPly || [];
+  // Find the last ply where either bucket has data so we don't draw a giant
+  // empty x-axis tail past where any game actually reached.
+  let lastPly = 0;
+  for(let p=1; p<series.length; p++){
+    if(series[p].leadingN > 0 || series[p].losingN > 0) lastPly = p;
+  }
+  const labels = [];
+  const conv = [];
+  const res  = [];
+  for(let p=1; p<=lastPly; p++){
+    labels.push(p);
+    const s = series[p];
+    conv.push(s.leadingN >= MIN_SAMPLE ? (s.leadingWins/s.leadingN*100) : null);
+    res .push(s.losingN  >= MIN_SAMPLE ? (s.losingSaves/s.losingN*100)   : null);
+  }
   charts.conv?.destroy?.();
-  charts.conv=new Chart(document.getElementById('conversionChart'),{
-    type:'bar', data:{labels:['Conversion (≥+2)','Resilience (≤-2)'],datasets:[
-      {label:'Rate %', data:[conv,res], backgroundColor:['#1a7f37','#175cd3']},
+  charts.conv = new Chart(document.getElementById('conversionChart'),{
+    type:'line',
+    data:{labels, datasets:[
+      {label:'Conversion %  (Win | ≥+2 at ply p)', data:conv, borderColor:'#1a7f37', backgroundColor:'rgba(26,127,55,.1)', tension:0.25, pointRadius:0, pointHoverRadius:3, spanGaps:true, borderWidth:1.8},
+      {label:'Resilience %  (Save | ≤−2 at ply p)', data:res,  borderColor:'#175cd3', backgroundColor:'rgba(23,92,211,.1)', tension:0.25, pointRadius:0, pointHoverRadius:3, spanGaps:true, borderWidth:1.8, borderDash:[5,4]},
     ]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Conversion & resilience at move 20'},legend:{display:false}},scales:{y:{min:0,max:100,title:{display:true,text:'%'}}}}
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{title:{display:true,text:'Conversion & resilience throughout the game'},legend:{position:'bottom'}},
+      interaction:{mode:'index',intersect:false},
+      scales:{
+        x:{title:{display:true,text:'Ply'}},
+        y:{min:0,max:100,title:{display:true,text:'%'}},
+      },
+    },
   });
 }
 function renderTimeControlTable(ins){
