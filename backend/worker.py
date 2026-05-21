@@ -11,14 +11,18 @@ from typing import Any
 import chess
 import chess.pgn
 
-from . import chesscom, db, stockfish_adapter
+from . import chesscom, db, openings, stockfish_adapter
 
 log = logging.getLogger(__name__)
 
 DEFAULT_DEPTH = 14
 DEFAULT_MOVETIME_MS = 250
 MAX_PLIES_PER_GAME = 300
-ENGINE_PROFILE = f"sf_d{DEFAULT_DEPTH}_mt{DEFAULT_MOVETIME_MS}_v1"
+# v2: best-move indexing now correctly references the alternative for the
+# mover (was previously the opponent's best response). Adds best_uci,
+# is_best, is_sacrifice, plus ECO opening fields per analysis.
+ENGINE_PROFILE = f"sf_d{DEFAULT_DEPTH}_mt{DEFAULT_MOVETIME_MS}_v2"
+PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 99}
 
 _thread: threading.Thread | None = None
 _stop = threading.Event()
@@ -125,6 +129,10 @@ def _process_job(job: dict[str, Any]) -> None:
                     moves_count=result["moves_count"],
                     evals=result["evals"],
                     plies=result["plies"],
+                    opening_eco=result.get("opening_eco"),
+                    opening_name=result.get("opening_name"),
+                    opening_ply=result.get("opening_ply", 0),
+                    opening_next_uci=result.get("opening_next_uci"),
                 )
             except Exception as e:  # noqa: BLE001
                 log.exception("[job %s] game %s analysis error", job_id, row["game_id"])
@@ -195,6 +203,33 @@ def _to_elo(err: float) -> float:
     return max(500.0, min(2900.0, 2550.0 - err * 3.1))
 
 
+def _is_sacrifice(board_before: chess.Board, mv: chess.Move) -> bool:
+    """Material-based sacrifice heuristic: does the mover leave a piece on a
+    square attacked by a lower-value piece, with a net material loss >= 2?
+    """
+    moved_piece = board_before.piece_at(mv.from_square)
+    if not moved_piece:
+        return False
+    moved_value = PIECE_VALUES.get(moved_piece.piece_type, 0)
+    captured_value = 0
+    if board_before.is_capture(mv):
+        cap_sq = board_before.ep_square if board_before.is_en_passant(mv) else mv.to_square
+        cap_piece = board_before.piece_at(cap_sq)
+        if cap_piece is not None:
+            captured_value = PIECE_VALUES.get(cap_piece.piece_type, 0)
+    net_loss = moved_value - captured_value
+    if net_loss < 2:
+        return False
+    test_board = board_before.copy(stack=False)
+    test_board.push(mv)
+    attackers = test_board.attackers(not moved_piece.color, mv.to_square)
+    for sq in attackers:
+        att = test_board.piece_at(sq)
+        if att and PIECE_VALUES.get(att.piece_type, 99) < moved_value:
+            return True
+    return False
+
+
 def _analyse_one_game(
     session: stockfish_adapter.StockfishSession,
     row: dict[str, Any],
@@ -206,6 +241,8 @@ def _analyse_one_game(
             "my_engine_elo": None, "opp_engine_elo": None,
             "used_fallback": True, "null_evals": 0, "engine_evals": 0,
             "moves_count": 0, "evals": [], "plies": [],
+            "opening_eco": None, "opening_name": None,
+            "opening_ply": 0, "opening_next_uci": None,
         }
     persp = chesscom.perspective(row, username)
     me_white = persp["me_white"]
@@ -216,11 +253,14 @@ def _analyse_one_game(
     null_evals = 0
     engine_evals = 0
 
-    # Position 0 (before first move)
+    # Analyse the starting position. prev_info's bestmove is the
+    # alternative-the-mover-could-have-played for the FIRST move; each
+    # subsequent ply re-uses the prior analyse() output the same way.
     info0 = session.analyse(board)
     prev = info0["eval_cp"] if info0["eval_cp"] is not None else 0
     evals.append(prev)
     engine_evals += 1
+    prev_info: dict[str, Any] = info0
 
     my_err = 0.0
     opp_err = 0.0
@@ -231,6 +271,12 @@ def _analyse_one_game(
     for i in range(n_moves):
         mv = moves[i]
         san = sans[i] if i < len(sans) else mv.uci()
+        # Best alternative for THIS move (the mover-side) is from prev_info,
+        # which analysed the position before the move was played.
+        best_san = prev_info.get("bestmove_san") or prev_info.get("bestmove_uci") or None
+        best_uci = prev_info.get("bestmove_uci")
+        pv_san = prev_info.get("pv_san") or prev_info.get("pv_uci") or ""
+
         captured_piece = None
         try:
             if board.is_capture(mv):
@@ -240,6 +286,11 @@ def _analyse_one_game(
                     captured_piece = pc.symbol()
         except Exception:
             captured_piece = None
+
+        is_sac = _is_sacrifice(board, mv)
+        played_uci = mv.uci()
+        is_best = (best_uci is not None and played_uci == best_uci)
+
         board.push(mv)
         try:
             info = session.analyse(board)
@@ -254,6 +305,7 @@ def _analyse_one_game(
             null_evals += 1
             e = prev
             info = {"bestmove_san": None, "bestmove_uci": None, "pv_san": "", "pv_uci": "", "mate": None}
+
         evals.append(e)
         delta = abs(e - prev)
         white_move = (i % 2 == 0)
@@ -264,19 +316,24 @@ def _analyse_one_game(
         else:
             opp_err += delta
             opp_n += 1
+
         plies.append({
             "ply": i + 1,
             "move": san,
-            "uci": mv.uci(),
+            "uci": played_uci,
             "fen": board.fen(),
             "eval": e,
             "mate": info.get("mate"),
-            "best": info.get("bestmove_san") or info.get("bestmove_uci") or "-",
-            "pv": info.get("pv_san") or info.get("pv_uci") or "",
+            "best": best_san or "-",
+            "best_uci": best_uci,
+            "pv": pv_san,
             "capture": captured_piece,
             "me_moved": bool(me_moved),
+            "is_best": is_best,
+            "is_sacrifice": is_sac,
         })
         prev = e
+        prev_info = info
 
     used_fallback = False
     if my_n == 0 or opp_n == 0:
@@ -289,6 +346,10 @@ def _analyse_one_game(
     my_engine_elo = _to_elo(my_err / my_n)
     opp_engine_elo = _to_elo(opp_err / opp_n)
 
+    # Opening identification across the full move sequence.
+    all_ucis = [m.uci() for m in moves[:n_moves]]
+    op = openings.opening_db.identify(all_ucis)
+
     return {
         "my_engine_elo": my_engine_elo,
         "opp_engine_elo": opp_engine_elo,
@@ -298,4 +359,8 @@ def _analyse_one_game(
         "moves_count": len(moves),
         "evals": evals,
         "plies": plies,
+        "opening_eco": op.get("eco"),
+        "opening_name": op.get("name"),
+        "opening_ply": op.get("last_ply", 0),
+        "opening_next_uci": op.get("next_uci"),
     }

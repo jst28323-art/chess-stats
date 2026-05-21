@@ -111,12 +111,27 @@ CREATE INDEX IF NOT EXISTS ix_analyses_game ON analyses(game_id);
 """
 
 
+_MIGRATIONS = [
+    "ALTER TABLE analyses ADD COLUMN opening_eco TEXT",
+    "ALTER TABLE analyses ADD COLUMN opening_name TEXT",
+    "ALTER TABLE analyses ADD COLUMN opening_ply INTEGER",
+    "ALTER TABLE analyses ADD COLUMN opening_next_uci TEXT",
+]
+
+
 def init_schema() -> None:
     with write_conn() as c:
         for stmt in SCHEMA.strip().split(";"):
             s = stmt.strip()
             if s:
                 c.execute(s)
+        for mig in _MIGRATIONS:
+            try:
+                c.execute(mig)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    continue
+                raise
 
 
 # ---------- Job helpers ----------
@@ -275,14 +290,20 @@ def upsert_analysis(
     evals: list[int],
     plies: list[dict[str, Any]],
     error: str | None = None,
+    opening_eco: str | None = None,
+    opening_name: str | None = None,
+    opening_ply: int = 0,
+    opening_next_uci: str | None = None,
 ) -> None:
     with write_conn() as c:
         c.execute(
             """
             INSERT INTO analyses (game_id, engine_profile, my_engine_elo, opp_engine_elo,
                                   used_fallback, null_evals, engine_evals, moves_count,
-                                  evals_json, plies_json, error, completed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  evals_json, plies_json, error,
+                                  opening_eco, opening_name, opening_ply, opening_next_uci,
+                                  completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id, engine_profile) DO UPDATE SET
               my_engine_elo=excluded.my_engine_elo,
               opp_engine_elo=excluded.opp_engine_elo,
@@ -293,6 +314,10 @@ def upsert_analysis(
               evals_json=excluded.evals_json,
               plies_json=excluded.plies_json,
               error=excluded.error,
+              opening_eco=excluded.opening_eco,
+              opening_name=excluded.opening_name,
+              opening_ply=excluded.opening_ply,
+              opening_next_uci=excluded.opening_next_uci,
               completed_at=excluded.completed_at
             """,
             (
@@ -307,6 +332,10 @@ def upsert_analysis(
                 json.dumps(evals),
                 json.dumps(plies),
                 error,
+                opening_eco,
+                opening_name,
+                int(opening_ply or 0),
+                opening_next_uci,
                 time.time(),
             ),
         )

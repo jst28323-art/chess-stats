@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import __version__, chesscom, db, stockfish_adapter, watcher, worker
+from . import __version__, chesscom, db, openings, stockfish_adapter, watcher, worker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,10 +35,16 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     db.init_schema()
+    # Warm the openings DB so the first analyse() in a job doesn't pay the
+    # network fetch latency. Safe to fail; book detection just stays disabled.
+    try:
+        openings.opening_db.ensure_loaded()
+    except Exception as e:  # noqa: BLE001
+        log.warning("openings warmup failed: %s", e)
     worker.start_worker()
     watcher.start_watcher()
-    log.info("backend ready  db=%s  engine_profile=%s  watch=%s",
-             db.db_path(), worker.ENGINE_PROFILE, watcher.WATCH_USERS)
+    log.info("backend ready  db=%s  engine_profile=%s  watch=%s  openings=%s",
+             db.db_path(), worker.ENGINE_PROFILE, watcher.WATCH_USERS, openings.opening_db.state())
     try:
         yield
     finally:
@@ -87,6 +93,7 @@ def health() -> dict[str, Any]:
         "db_path": db.db_path(),
         "jobs": counts,
         "watcher": watcher.state(),
+        "openings": openings.opening_db.state(),
         "server_time": time.time(),
     }
 
@@ -193,6 +200,10 @@ def game_analysis(game_id: str) -> dict[str, Any]:
         "engine_evals": analysis["engine_evals"],
         "evals": analysis["evals"],
         "plies": analysis["plies"],
+        "opening_eco": analysis.get("opening_eco"),
+        "opening_name": analysis.get("opening_name"),
+        "opening_ply": analysis.get("opening_ply") or 0,
+        "opening_next_uci": analysis.get("opening_next_uci"),
         "error": analysis.get("error"),
     }
 

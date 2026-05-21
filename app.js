@@ -85,6 +85,95 @@ const MAX_MS_PER_GAME=900000;
 const PIECE_SOLID={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
 const WHITE_STROKE='text-shadow:0 0 1px #000,1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000';
 const BLACK_STROKE='text-shadow:0 0 1px rgba(255,255,255,.4)';
+// ----- arrow + classification helpers (used by review panel) -----
+const ARROW_COLORS = {played:'#1d6cf2', best:'#2ea043', book:'#8b4513'};
+const CLASS_STYLE = {
+  brilliant: {label:'Brilliant', fg:'#0098f1', bg:'rgba(0,152,241,.13)'},
+  best:      {label:'Best',      fg:'#1a7f37', bg:'rgba(26,127,55,.12)'},
+  good:      {label:'Good',      fg:'#4b6b2a', bg:'rgba(75,107,42,.12)'},
+  book:      {label:'Book',      fg:'#8b4513', bg:'rgba(139,69,19,.14)'},
+  inaccuracy:{label:'Inaccuracy',fg:'#175cd3', bg:'rgba(23,92,211,.12)'},
+  mistake:   {label:'Mistake',   fg:'#b54708', bg:'rgba(181,71,8,.14)'},
+  blunder:   {label:'Blunder',   fg:'#b42318', bg:'rgba(180,35,24,.14)'},
+};
+function uciSquareToPx(sq, flip, size=42){
+  if(!sq || sq.length<2) return null;
+  const file=sq.charCodeAt(0)-97, rank=sq.charCodeAt(1)-49;
+  if(file<0||file>7||rank<0||rank>7) return null;
+  const col = flip ? (7-file) : file;
+  const row = flip ? rank : (7-rank);
+  return { x: col*size + size/2, y: row*size + size/2 };
+}
+function drawArrowsOnBoard(boardHost, arrows, flip){
+  if(!boardHost || !arrows || !arrows.length) return;
+  const boardEl = boardHost.firstElementChild;
+  if(!boardEl) return;
+  boardEl.style.position = 'relative';
+  const NS = 'http://www.w3.org/2000/svg';
+  const sz = 8*42;
+  const svg = document.createElementNS(NS,'svg');
+  svg.setAttribute('width',sz); svg.setAttribute('height',sz);
+  svg.setAttribute('viewBox',`0 0 ${sz} ${sz}`);
+  svg.setAttribute('style','position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none');
+  const defs = document.createElementNS(NS,'defs');
+  const colors = new Set(arrows.map(a=>a.color));
+  for(const c of colors){
+    const id = 'ah-'+c.replace(/[^a-z0-9]/gi,'');
+    const m = document.createElementNS(NS,'marker');
+    m.setAttribute('id', id);
+    m.setAttribute('viewBox','0 0 10 10');
+    m.setAttribute('refX','7'); m.setAttribute('refY','5');
+    m.setAttribute('markerWidth','4.5'); m.setAttribute('markerHeight','4.5');
+    m.setAttribute('orient','auto-start-reverse');
+    const p = document.createElementNS(NS,'path');
+    p.setAttribute('d','M0,0 L10,5 L0,10 z'); p.setAttribute('fill', c);
+    m.appendChild(p); defs.appendChild(m);
+  }
+  svg.appendChild(defs);
+  for(const a of arrows){
+    const p = uciSquareToPx(a.from, flip), q = uciSquareToPx(a.to, flip);
+    if(!p || !q) continue;
+    const dx=q.x-p.x, dy=q.y-p.y, len=Math.hypot(dx,dy);
+    if(len < 1) continue;
+    const ux=dx/len, uy=dy/len, shortHead=14;
+    const x2=q.x-ux*shortHead, y2=q.y-uy*shortHead;
+    const line = document.createElementNS(NS,'line');
+    line.setAttribute('x1',p.x); line.setAttribute('y1',p.y);
+    line.setAttribute('x2',x2); line.setAttribute('y2',y2);
+    line.setAttribute('stroke', a.color);
+    line.setAttribute('stroke-width', a.width||5);
+    line.setAttribute('stroke-linecap','round');
+    line.setAttribute('opacity', a.opacity != null ? a.opacity : 0.85);
+    line.setAttribute('marker-end', `url(#ah-${a.color.replace(/[^a-z0-9]/gi,'')})`);
+    svg.appendChild(line);
+  }
+  boardEl.appendChild(svg);
+}
+function classifyPlyMove(rows, idx, evals){
+  if(idx === 0) return null;
+  const r = rows[idx-1]; if(!r) return null;
+  const openingPly = (rows.opening && rows.opening.ply) || 0;
+  if(idx <= openingPly) return 'book';
+  const cpBefore = evals[idx-1], cpAfter = evals[idx];
+  if(cpBefore == null || cpAfter == null) return null;
+  const whiteMove = (idx % 2 === 1);
+  const cpLoss = Math.max(0, whiteMove ? (cpBefore - cpAfter) : (cpAfter - cpBefore));
+  if(r.is_best){
+    if(r.is_sacrifice) return 'brilliant';
+    return 'best';
+  }
+  if(cpLoss >= 200) return 'blunder';
+  if(cpLoss >= 100) return 'mistake';
+  if(cpLoss >= 50)  return 'inaccuracy';
+  if(cpLoss >= 15)  return 'good';
+  return 'best';
+}
+function renderClassBadge(cls){
+  if(!cls) return '';
+  const s = CLASS_STYLE[cls]; if(!s) return '';
+  return `<span style="display:inline-block;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${s.fg};background:${s.bg};border:1px solid ${s.fg}33;margin-right:6px">${s.label}</span>`;
+}
+
 function renderFenBoard(fen, flip=false){
   // Expand FEN ranks to 8-length arrays (board[0] = rank 8, board[7] = rank 1).
   const board=fen.split(' ')[0].split('/').map(rank=>{
@@ -434,7 +523,22 @@ async function analyzeGameDetailed(g,user){
   if(BACKEND.healthy && g && g.url && BACKEND.byUrl.has(g.url)){
     const a=await fetchBackendGameAnalysis(g.url);
     if(a && Array.isArray(a.plies) && a.plies.length){
-      return a.plies.map(p=>({ply:p.ply,move:p.move,eval:p.eval,best:p.best||'-',pv:p.pv||'',fen:p.fen,capture:p.capture}));
+      const rows = a.plies.map(p=>({
+        ply:p.ply, move:p.move, uci:p.uci,
+        eval:p.eval, mate:p.mate,
+        best:p.best||'-', best_uci:p.best_uci, pv:p.pv||'',
+        fen:p.fen, capture:p.capture,
+        is_best:!!p.is_best, is_sacrifice:!!p.is_sacrifice,
+      }));
+      // Attach opening metadata as a property of the array (used by the
+      // review panel to show the opening name + last-book-move indicator).
+      rows.opening = {
+        eco: a.opening_eco || null,
+        name: a.opening_name || null,
+        ply: a.opening_ply || 0,
+        next_uci: a.opening_next_uci || null,
+      };
+      return rows;
     }
   }
   const ChessCtor=getChessCtor();
@@ -443,10 +547,20 @@ async function analyzeGameDetailed(g,user){
   const chess=new ChessCtor();
   const rows=[];
   for(let i=0;i<Math.min(moves.length,120);i++){
-    if(!chess.move(moves[i],{sloppy:true})) continue;
+    const mv = chess.move(moves[i],{sloppy:true});
+    if(!mv) continue;
+    const uci = (mv.from||'') + (mv.to||'') + (mv.promotion||'');
     const obj=await evalFenWithRetry(chess.fen(),Math.max(8,EVAL_DEPTH));
-    rows.push({ply:i+1,move:moves[i],eval:obj&&typeof obj.score==='number'?obj.score:null,best:obj&&obj.bestmove?obj.bestmove:'-',pv:obj&&obj.pv?obj.pv:''});
+    rows.push({
+      ply:i+1, move:moves[i], uci,
+      eval:obj&&typeof obj.score==='number'?obj.score:null,
+      best:obj&&obj.bestmove?obj.bestmove:'-',
+      best_uci:obj&&obj.bestmove?obj.bestmove:null,
+      pv:obj&&obj.pv?obj.pv:'',
+      is_best:false, is_sacrifice:false,
+    });
   }
+  rows.opening = {eco:null, name:null, ply:0, next_uci:null};
   return rows;
 }
 
@@ -864,7 +978,8 @@ function drawFeedDetails(filtered,pointMap){
 
     const render = () => {
       const fen = fens[Math.min(idx, fens.length-1)];
-      document.getElementById('boardHost').innerHTML = renderFenBoard(fen, flipBoard);
+      const boardHost = document.getElementById('boardHost');
+      boardHost.innerHTML = renderFenBoard(fen, flipBoard);
       // Ply 0 = starting position (no row); ply k>=1 corresponds to rows[k-1].
       let r={}, cap=null, cp=null, mate=null;
       if(idx === 0){
@@ -875,14 +990,50 @@ function drawFeedDetails(filtered,pointMap){
         cp = (r.eval != null) ? r.eval : (evals[idx] != null ? evals[idx] : null);
         mate = (r.mate != null) ? r.mate : null;
       }
+      // Build arrows. Played in blue, best in green; if the played move IS
+      // the best move, draw only a single green arrow. On the last book
+      // move, add a brown arrow showing what the next book continuation
+      // would have been.
+      const arrows = [];
+      if(idx >= 1){
+        const played = r.uci, bestU = r.best_uci;
+        if(played && bestU && played.slice(0,4) === bestU.slice(0,4)){
+          arrows.push({from:played.slice(0,2), to:played.slice(2,4), color:ARROW_COLORS.best, opacity:0.92, width:6});
+        } else {
+          if(played) arrows.push({from:played.slice(0,2), to:played.slice(2,4), color:ARROW_COLORS.played, opacity:0.8, width:5});
+          if(bestU)  arrows.push({from:bestU.slice(0,2),  to:bestU.slice(2,4),  color:ARROW_COLORS.best,   opacity:0.92, width:5});
+        }
+        const opening = rows.opening;
+        if(opening && opening.ply === idx && opening.next_uci){
+          arrows.push({from:opening.next_uci.slice(0,2), to:opening.next_uci.slice(2,4), color:ARROW_COLORS.book, opacity:0.85, width:5});
+        }
+      }
+      drawArrowsOnBoard(boardHost, arrows, flipBoard);
+
       updateEvalBar(cp, mate);
       updateChartHighlight();
       document.getElementById('plyMeta').textContent = `Ply ${idx}/${fens.length-1}`;
+
+      // Classification badge + opening info
+      const cls = classifyPlyMove(rows, idx, evals);
+      const badge = renderClassBadge(cls);
+      let openingHtml = '';
+      const op = rows.opening;
+      if(op && op.name){
+        if(idx >= 1 && idx <= op.ply){
+          const isLast = (idx === op.ply);
+          const lastSuffix = isLast ? ` · <span style="color:#8b4513;font-weight:700">Last book move</span>${op.next_uci?' (brown arrow shows next book)':''}` : '';
+          openingHtml = `<div class="sub" style="margin-top:6px;font-size:12px"><span style="color:#8b4513;font-weight:600">${op.eco?op.eco+' · ':''}${op.name}</span>${lastSuffix}</div>`;
+        } else if(idx === op.ply + 1 && op.ply > 0){
+          openingHtml = `<div class="sub" style="margin-top:6px;font-size:12px;color:var(--muted)">Out of book — was ${op.eco?op.eco+' · ':''}${op.name}</div>`;
+        }
+      }
+
       const evalLabel = mate!=null ? `M${Math.abs(mate)}` : (cp!=null ? cp : 'n/a');
       if(idx === 0){
-        document.getElementById('plyInfo').innerHTML = `<span class='sub'>Starting position. Eval: <b>${evalLabel}</b></span>`;
+        document.getElementById('plyInfo').innerHTML = `<span class='sub'>Starting position. Eval: <b>${evalLabel}</b></span>${openingHtml}`;
       } else {
-        document.getElementById('plyInfo').innerHTML = `Played: <b>${r.move||'-'}</b> | Eval: <b>${evalLabel}</b> | Best: <b>${r.best||'-'}</b> | Captured: <b>${cap||'none'}</b><br/>PV: ${r.pv||'-'}`;
+        document.getElementById('plyInfo').innerHTML = `${badge}Played: <b>${r.move||'-'}</b> | Eval: <b>${evalLabel}</b> | Best: <b>${r.best||'-'}</b> | Captured: <b>${cap||'none'}</b><br/>PV: ${r.pv||'-'}${openingHtml}`;
       }
     };
     document.getElementById('prevPly').onclick=()=>{ idx=Math.max(0,idx-1); render(); };
