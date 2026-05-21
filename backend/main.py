@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import __version__, chesscom, db, stockfish_adapter, worker
+from . import __version__, chesscom, db, stockfish_adapter, watcher, worker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,10 +36,13 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):  # noqa: ARG001
     db.init_schema()
     worker.start_worker()
-    log.info("backend ready  db=%s  engine_profile=%s", db.db_path(), worker.ENGINE_PROFILE)
+    watcher.start_watcher()
+    log.info("backend ready  db=%s  engine_profile=%s  watch=%s",
+             db.db_path(), worker.ENGINE_PROFILE, watcher.WATCH_USERS)
     try:
         yield
     finally:
+        watcher.stop_watcher()
         worker.stop_worker()
 
 
@@ -83,8 +86,14 @@ def health() -> dict[str, Any]:
         "stockfish": {"available": sf_ok, "path": sf_path, "error": sf_err},
         "db_path": db.db_path(),
         "jobs": counts,
+        "watcher": watcher.state(),
         "server_time": time.time(),
     }
+
+
+@app.get("/api/watcher/status")
+def watcher_status() -> dict[str, Any]:
+    return watcher.state()
 
 
 @app.post("/api/analyze/player/{username}", response_model=JobCreated)
