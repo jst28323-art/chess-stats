@@ -85,26 +85,32 @@ const MAX_MS_PER_GAME=900000;
 const PIECE_SOLID={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
 const WHITE_STROKE='text-shadow:0 0 1px #000,1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000';
 const BLACK_STROKE='text-shadow:0 0 1px rgba(255,255,255,.4)';
-function renderFenBoard(fen){
-  const board=fen.split(' ')[0].split('/');
+function renderFenBoard(fen, flip=false){
+  // Expand FEN ranks to 8-length arrays (board[0] = rank 8, board[7] = rank 1).
+  const board=fen.split(' ')[0].split('/').map(rank=>{
+    const out=[]; for(const ch of rank){
+      if(/\d/.test(ch)){ for(let k=0;k<Number(ch);k++) out.push(null); }
+      else out.push(ch);
+    } return out;
+  });
+  // Display order: when flipped (user played black), render rank 1 at top
+  // and files h-a left-to-right. Square color still derives from underlying
+  // (r,f) FEN coords so the parity is identical -- only iteration order changes.
+  const rankOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+  const fileOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
   let html='<div style="display:grid;grid-template-columns:repeat(8,42px);gap:0;border:1px solid #999;width:max-content;border-radius:4px;overflow:hidden">';
-  for(let r=0;r<8;r++){
-    let file=0;
-    for(const ch of board[r]){
-      if(/\d/.test(ch)){
-        for(let k=0;k<Number(ch);k++){
-          const dark=(r+file)%2===1;
-          html+=`<div style="width:42px;height:42px;background:${dark?'#769656':'#eeeed2'}"></div>`;
-          file++;
-        }
+  for(const r of rankOrder){
+    for(const f of fileOrder){
+      const dark=(r+f)%2===1;
+      const ch=board[r][f];
+      if(!ch){
+        html+=`<div style="width:42px;height:42px;background:${dark?'#769656':'#eeeed2'}"></div>`;
       } else {
-        const dark=(r+file)%2===1;
         const isWhite = ch===ch.toUpperCase();
         const glyph = PIECE_SOLID[ch.toLowerCase()]||'';
         const color = isWhite?'#ffffff':'#1d1d1f';
         const stroke = isWhite?WHITE_STROKE:BLACK_STROKE;
         html+=`<div style="width:42px;height:42px;display:flex;align-items:center;justify-content:center;background:${dark?'#769656':'#eeeed2'}"><span style="font-size:32px;line-height:1;color:${color};${stroke}">${glyph}</span></div>`;
-        file++;
       }
     }
   }
@@ -767,15 +773,32 @@ function drawFeedDetails(filtered,pointMap){
   document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',async()=>{
     const i=Number(btn.dataset.idx); const p=pointMap[i];
     if(!p || !p.evals){ els.gameDetails().innerHTML='<div class="sub">No move-by-move eval available yet for this game.</div>'; return; }
-    // Persistent layout: eval bar + board host are never replaced, so CSS
-    // height transitions on the bar animate smoothly between plies.
+    // Game header + board orientation: user color at the bottom.
+    const persp = perspective(filtered[i], current.user);
+    const meWhite = persp.meWhite;
+    const flipBoard = !meWhite;
+    const oppName = (persp.opp && persp.opp.username) || '?';
+    const oppRating = (persp.opp && persp.opp.rating) || null;
+    const myRating = (persp.me && persp.me.rating) || null;
+    const tcLabel = (filtered[i].time_class||'').replace(/^./,c=>c.toUpperCase()) || 'Game';
+    const dateStr = new Date(filtered[i].end_time*1000).toISOString().slice(0,10);
+    const outcome = persp.outcome;
+    // Eval bar order: opponent color always on top, user color on bottom.
+    // Math is unchanged (ebWhite height = pct%, ebBlack height = 100-pct%);
+    // we only reorder the DOM so "your color" sits at the bottom of the bar.
+    const ebBlackDiv = `<div id="ebBlack" style="background:#1d1d1f;width:100%;height:50%;transition:height .35s cubic-bezier(.2,.7,.2,1)"></div>`;
+    const ebWhiteDiv = `<div id="ebWhite" style="background:#f8f8fb;width:100%;height:50%;transition:height .35s cubic-bezier(.2,.7,.2,1);border-top:1px solid rgba(0,0,0,.25)"></div>`;
+    const ebInner = meWhite ? (ebBlackDiv + ebWhiteDiv) : (ebWhiteDiv + ebBlackDiv);
     els.gameDetails().innerHTML=`
+      <div style="margin-bottom:10px">
+        <div style="font-size:16px;font-weight:600;letter-spacing:-.01em">vs ${oppName} <span style="color:var(--muted);font-weight:500">(${oppRating!=null?oppRating:'?'})</span></div>
+        <div class="sub" style="font-size:12px;margin-top:2px">${tcLabel} · ${dateStr} · You played <b>${meWhite?'WHITE':'BLACK'}</b>${myRating!=null?` (${myRating})`:''} · <span class="${outcome.toLowerCase()}">${outcome}</span></div>
+      </div>
       <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
         <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
           <div id="ebLabel" class="sub" style="font-size:13px;width:48px;text-align:center;font-variant-numeric:tabular-nums;font-weight:600;color:var(--text)">0.0</div>
           <div style="width:26px;height:336px;border:1px solid #999;display:flex;flex-direction:column;overflow:hidden;border-radius:4px;background:#1d1d1f;box-shadow:0 1px 4px rgba(0,0,0,.12)">
-            <div id="ebBlack" style="background:#1d1d1f;width:100%;height:50%;transition:height .35s cubic-bezier(.2,.7,.2,1)"></div>
-            <div id="ebWhite" style="background:#f8f8fb;width:100%;height:50%;transition:height .35s cubic-bezier(.2,.7,.2,1);border-top:1px solid rgba(0,0,0,.25)"></div>
+            ${ebInner}
           </div>
         </div>
         <div id="boardHost"></div>
@@ -841,7 +864,7 @@ function drawFeedDetails(filtered,pointMap){
 
     const render = () => {
       const fen = fens[Math.min(idx, fens.length-1)];
-      document.getElementById('boardHost').innerHTML = renderFenBoard(fen);
+      document.getElementById('boardHost').innerHTML = renderFenBoard(fen, flipBoard);
       // Ply 0 = starting position (no row); ply k>=1 corresponds to rows[k-1].
       let r={}, cap=null, cp=null, mate=null;
       if(idx === 0){
