@@ -6,9 +6,9 @@ const daysAgoTs=d=>Math.floor((Date.now()-d*86400000)/1000);
 const getFilterStart=f=>f==='24h'?daysAgoTs(1):f==='7d'?daysAgoTs(7):f==='30d'?daysAgoTs(30):f==='90d'?daysAgoTs(90):0;
 const parseMoves=pgn=>(pgn||'').replace(/\{[^}]*\}|\([^)]*\)|\[[^\]]*\]|\d+\.(\.\.)?|\$\d+|1-0|0-1|1\/2-1\/2|\*/g,' ').trim().split(/\s+/).filter(Boolean);
 const EVAL_DEPTH=10;
-const POSITION_TIMEOUT_MS=2500;
+const POSITION_TIMEOUT_MS=8000;
 const MAX_MOVES_PER_GAME=300;
-const MAX_MS_PER_GAME=180000;
+const MAX_MS_PER_GAME=300000;
 const ENGINE_PROFILE=`d${EVAL_DEPTH}_pt${POSITION_TIMEOUT_MS}_mm${MAX_MOVES_PER_GAME}_mg${MAX_MS_PER_GAME}_v1`;
 
 const els={
@@ -120,6 +120,12 @@ async function runEngineSelfTest(){
   return true;
 }
 
+async function evalFenWithRetry(fen, depth=EVAL_DEPTH){
+  let v=await evalFen(fen,depth);
+  if(v==null){ v=await evalFen(fen,depth); }
+  return v;
+}
+
 async function getJson(u){const r=await fetch(u); if(!r.ok) throw new Error(`HTTP ${r.status}: ${u}`); return r.json();}
 async function loadData(user){const idx=await getJson(`${BASE}/${user}/games/archives`); const months=await Promise.all((idx.archives||[]).map(getJson)); return months.flatMap(m=>m.games||[]);} 
 function perspective(g,u){const meWhite=g.white.username?.toLowerCase()===u.toLowerCase(),me=meWhite?g.white:g.black,opp=meWhite?g.black:g.white,res=me.result,outcome=res==='win'?'Win':(DRAW_RESULTS.has(res)?'Draw':'Loss');return {meWhite,me,opp,res,outcome};}
@@ -140,17 +146,17 @@ async function evaluateGameMoveByMove(g,user,onProgress){
   const chess=new ChessCtor();
   const evals=[];
   const tGameStart=Date.now();
-  let prev=await evalFen(chess.fen(),EVAL_DEPTH);
+  let prev=await evalFenWithRetry(chess.fen(),EVAL_DEPTH);
   if(prev==null) prev=0;
   evals.push(prev);
-  let myErr=0,oppErr=0,myN=0,oppN=0;
+  let myErr=0,oppErr=0,myN=0,oppN=0,nullEvals=0,engineEvals=0;
   for(let i=0;i<Math.min(moves.length,MAX_MOVES_PER_GAME);i++){
     if(Date.now()-tGameStart>MAX_MS_PER_GAME){ setDiag('per-game time budget reached'); break; }
     if(!chess.move(moves[i],{sloppy:true})) continue;
     if(i%5===0 && onProgress) onProgress(i+1, Math.min(moves.length,MAX_MOVES_PER_GAME));
     if(i%20===0){ setDiag(engine.fallback?`fallback analyzing move ${i+1}`:`analyzing move ${i+1}`); }
-    let e=await evalFen(chess.fen(),EVAL_DEPTH);
-    if(e==null) e=prev; // continuity for plotting every move
+    let e=await evalFenWithRetry(chess.fen(),EVAL_DEPTH);
+    if(e==null){ nullEvals++; e=prev; } else { engineEvals++; } // continuity for plotting every move
     evals.push(e);
     const delta=Math.abs(e-prev);
     const whiteMove=i%2===0;
@@ -163,14 +169,29 @@ async function evaluateGameMoveByMove(g,user,onProgress){
     myErr=base + (res==='win'?-18:res==='timeout'?18:0); oppErr=base + (res==='win'?18:-10); myN=oppN=1;
   }
   const toElo=err=>Math.max(500,Math.min(2900,2550-err*3.1));
-  const usedFallback = (myN===1 && oppN===1 && evals.length<=2);
+  let lowConfidence = engineEvals < Math.max(3, Math.floor((myN+oppN)*0.15));
+  if(lowConfidence && !engine.fallback){
+    // second pass on sparse positions for better confidence
+    const chess2=new ChessCtor();
+    let prev2=await evalFenWithRetry(chess2.fen(),EVAL_DEPTH);
+    if(prev2==null) prev2=prev;
+    let addEngine=0;
+    for(let i=0;i<Math.min(moves.length,MAX_MOVES_PER_GAME);i+=2){
+      if(!chess2.move(moves[i],{sloppy:true})) continue;
+      let e2=await evalFenWithRetry(chess2.fen(),EVAL_DEPTH);
+      if(e2!=null){ addEngine++; prev2=e2; }
+    }
+    engineEvals += addEngine;
+    lowConfidence = engineEvals < Math.max(3, Math.floor((myN+oppN)*0.15));
+  }
+  const usedFallback = (myN===1 && oppN===1 && evals.length<=2) || lowConfidence;
   let myEngineElo=toElo(myErr/myN), oppEngineElo=toElo(oppErr/oppN);
   if(usedFallback){
     const jitter=((moves.length%7)-3)*6;
     myEngineElo=Math.max(650,myEngineElo+jitter);
     oppEngineElo=Math.max(650,oppEngineElo-jitter);
   }
-  const out={myEngineElo,oppEngineElo,evals,movesCount:moves.length,usedFallback};
+  const out={myEngineElo,oppEngineElo,evals,movesCount:moves.length,usedFallback,nullEvals,engineEvals};
   evalCache.set(key,out); saveCache();
   return out;
 }
@@ -182,7 +203,7 @@ function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart
 function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(els.volumeChart(),{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
 function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
 function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;}).join('');}
-function drawFeedDetails(filtered,pointMap){els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div>`;
+function drawFeedDetails(filtered,pointMap){const done=pointMap.filter(p=>p.myEng!==null&&p.oppEng!==null).length;const fallbackCount=pointMap.filter(p=>p.usedFallback).length;const avgEdge=(pointMap.filter(p=>p.myEng&&p.oppEng).reduce((a,p)=>a+(p.myEng-p.oppEng),0)/(Math.max(1,pointMap.filter(p=>p.myEng&&p.oppEng).length))).toFixed(1);const totalNull=pointMap.reduce((a,p)=>a+(p.nullEvals||0),0);const totalEng=pointMap.reduce((a,p)=>a+(p.engineEvals||0),0);els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div><div class='glass card'><div class='k'>Games Evaluated</div><div class='v'>${done}/${pointMap.length}</div></div><div class='glass card'><div class='k'>Fallback Games</div><div class='v'>${fallbackCount}</div></div><div class='glass card'><div class='k'>Avg Engine Edge</div><div class='v'>${avgEdge}</div></div><div class='glass card'><div class='k'>Engine / Null Positions</div><div class='v'>${totalEng}/${totalNull}</div></div>`;
   els.gameDetails().innerHTML='<div class="sub">Click a game row to open move-by-move eval chart.</div>';
   document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',()=>{
     const i=Number(btn.dataset.idx); const p=pointMap[i];
@@ -201,7 +222,7 @@ async function run(){const user=els.username().value.trim();const range=els.rang
     if(!selfTested){ selfTested=true; await runEngineSelfTest(); setStatus('Engine self-test complete. Starting game evaluations...'); }
     if(current.user!==user||!current.games.length){current.user=user;current.games=await loadData(user);} 
     const filtered=filterGames(current.games,user,range,timeClass,limit);
-    const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null,usedFallback:false};});
+    const points=filtered.map((g,i)=>{const p=perspective(g,user);return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,myElo:p.me.rating||null,oppElo:p.opp.rating||null,myEng:null,oppEng:null,evals:null,usedFallback:false,nullEvals:0,engineEvals:0};});
     updateProgressive(points,filtered,0,filtered.length);
     for(let i=0;i<filtered.length;i++){
       if(token!==runToken) return;
@@ -211,6 +232,8 @@ async function run(){const user=els.username().value.trim();const range=els.rang
       points[i].oppEng=Math.round(eng.oppEngineElo);
       points[i].evals=eng.evals;
       points[i].usedFallback=!!eng.usedFallback;
+      points[i].nullEvals=eng.nullEvals||0;
+      points[i].engineEvals=eng.engineEvals||0;
       updateProgressive(points,filtered,i+1,filtered.length);
     }
   } catch(e){setStatus(`Error: ${e.message}`); console.error(e);}
