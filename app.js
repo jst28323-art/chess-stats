@@ -80,13 +80,14 @@ function onEngineMsg(line){
     return;
   }
   if(!engine.pending) return;
-  if(line.startsWith('info')&&line.includes(' score ')) engine.pending.lastInfo=line;
+  if(line.startsWith('info')&&line.includes(' score ')){ engine.pending.lastInfo=line; const pv=line.match(/\spv\s(.+)$/); if(pv) engine.pending.lastPv=pv[1]; }
   if(line.startsWith('bestmove')){
     clearTimeout(engine.pending.timer);
     const p=engine.pending;
     engine.pending=null;
     engine.completed++;
-    p.resolve(parseScore(p.lastInfo));
+    const best=(line.split(' ')[1]||'').trim();
+    p.resolve({score:parseScore(p.lastInfo),bestmove:best,pv:(p.lastPv||'')});
   }
 }
 function parseScore(info){
@@ -146,8 +147,8 @@ async function evaluateGameMoveByMove(g,user,onProgress){
   const chess=new ChessCtor();
   const evals=[];
   const tGameStart=Date.now();
-  let prev=await evalFenWithRetry(chess.fen(),EVAL_DEPTH);
-  if(prev==null) prev=0;
+  let prevObj=await evalFenWithRetry(chess.fen(),EVAL_DEPTH);
+  let prev=(prevObj&&typeof prevObj.score==='number')?prevObj.score:0;
   evals.push(prev);
   let myErr=0,oppErr=0,myN=0,oppN=0,nullEvals=0,engineEvals=0;
   for(let i=0;i<Math.min(moves.length,MAX_MOVES_PER_GAME);i++){
@@ -155,7 +156,8 @@ async function evaluateGameMoveByMove(g,user,onProgress){
     if(!chess.move(moves[i],{sloppy:true})) continue;
     if(i%5===0 && onProgress) onProgress(i+1, Math.min(moves.length,MAX_MOVES_PER_GAME));
     if(i%20===0){ setDiag(engine.fallback?`fallback analyzing move ${i+1}`:`analyzing move ${i+1}`); }
-    let e=await evalFenWithRetry(chess.fen(),EVAL_DEPTH);
+    let eObj=await evalFenWithRetry(chess.fen(),EVAL_DEPTH);
+    let e=(eObj&&typeof eObj.score==='number')?eObj.score:null;
     if(e==null){ nullEvals++; e=prev; } else { engineEvals++; } // continuity for plotting every move
     evals.push(e);
     const delta=Math.abs(e-prev);
@@ -173,18 +175,19 @@ async function evaluateGameMoveByMove(g,user,onProgress){
   if(lowConfidence && !engine.fallback){
     // second pass on sparse positions for better confidence
     const chess2=new ChessCtor();
-    let prev2=await evalFenWithRetry(chess2.fen(),EVAL_DEPTH);
-    if(prev2==null) prev2=prev;
+    let prev2Obj=await evalFenWithRetry(chess2.fen(),EVAL_DEPTH);
+    let prev2=(prev2Obj&&typeof prev2Obj.score==='number')?prev2Obj.score:prev;
     let addEngine=0;
     for(let i=0;i<Math.min(moves.length,MAX_MOVES_PER_GAME);i+=2){
       if(!chess2.move(moves[i],{sloppy:true})) continue;
-      let e2=await evalFenWithRetry(chess2.fen(),EVAL_DEPTH);
+      let e2Obj=await evalFenWithRetry(chess2.fen(),EVAL_DEPTH);
+      let e2=(e2Obj&&typeof e2Obj.score==='number')?e2Obj.score:null;
       if(e2!=null){ addEngine++; prev2=e2; }
     }
     engineEvals += addEngine;
     lowConfidence = engineEvals < Math.max(3, Math.floor((myN+oppN)*0.15));
   }
-  const usedFallback = (myN===1 && oppN===1 && evals.length<=2) || lowConfidence;
+  const usedFallback = (myN===1 && oppN===1 && evals.length<=2) || lowConfidence || (engineEvals===0) || (myEngineElo===500 && oppEngineElo===500);
   let myEngineElo=toElo(myErr/myN), oppEngineElo=toElo(oppErr/oppN);
   if(usedFallback){
     const jitter=((moves.length%7)-3)*6;
@@ -203,14 +206,35 @@ function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart
 function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(els.volumeChart(),{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
 function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
 function renderFeed(games,points){els.feedCount().textContent=`${games.length} games`;els.gamesFeed().innerHTML=games.map((g,i)=>{const p=perspective(g,current.user),e=points[i];const d=new Date(g.end_time*1000).toISOString().slice(0,10);return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;}).join('');}
+
+async function analyzeGameDetailed(g,user){
+  const ChessCtor=getChessCtor();
+  if(!ChessCtor) return [];
+  const moves=parseMoves(g.pgn);
+  const chess=new ChessCtor();
+  const rows=[];
+  for(let i=0;i<Math.min(moves.length,120);i++){
+    if(!chess.move(moves[i],{sloppy:true})) continue;
+    const obj=await evalFenWithRetry(chess.fen(),Math.max(8,EVAL_DEPTH));
+    rows.push({ply:i+1,move:moves[i],eval:obj&&typeof obj.score==='number'?obj.score:null,best:obj&&obj.bestmove?obj.bestmove:'-',pv:obj&&obj.pv?obj.pv:''});
+  }
+  return rows;
+}
+
 function drawFeedDetails(filtered,pointMap){const done=pointMap.filter(p=>p.myEng!==null&&p.oppEng!==null).length;const fallbackCount=pointMap.filter(p=>p.usedFallback).length;const avgEdge=(pointMap.filter(p=>p.myEng&&p.oppEng).reduce((a,p)=>a+(p.myEng-p.oppEng),0)/(Math.max(1,pointMap.filter(p=>p.myEng&&p.oppEng).length))).toFixed(1);const totalNull=pointMap.reduce((a,p)=>a+(p.nullEvals||0),0);const totalEng=pointMap.reduce((a,p)=>a+(p.engineEvals||0),0);els.advancedKpis().innerHTML=`<div class='glass card'><div class='k'>Engine mode</div><div class='v' style='font-size:18px'>${engine.fallback?'Fallback estimate mode':(engine.ready?'Stockfish worker active':'Stockfish warming up')}</div></div><div class='glass card'><div class='k'>Games Evaluated</div><div class='v'>${done}/${pointMap.length}</div></div><div class='glass card'><div class='k'>Fallback Games</div><div class='v'>${fallbackCount}</div></div><div class='glass card'><div class='k'>Avg Engine Edge</div><div class='v'>${avgEdge}</div></div><div class='glass card'><div class='k'>Engine / Null Positions</div><div class='v'>${totalEng}/${totalNull}</div></div>`;
   els.gameDetails().innerHTML='<div class="sub">Click a game row to open move-by-move eval chart.</div>';
-  document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',()=>{
+  document.querySelectorAll('.game-row').forEach(btn=>btn.addEventListener('click',async()=>{
     const i=Number(btn.dataset.idx); const p=pointMap[i];
     if(!p || !p.evals){ els.gameDetails().innerHTML='<div class="sub">No move-by-move eval available yet for this game.</div>'; return; }
-    els.gameDetails().innerHTML='<div class="chart-card" style="height:300px"><canvas id="gameEvalChart"></canvas></div><div class="sub">Move-by-move eval (cp, White+)</div>';
+    els.gameDetails().innerHTML='<div class="chart-card" style="height:240px"><canvas id="gameEvalChart"></canvas></div><div class="toolbar"><button id="prevPly">Prev</button><button id="nextPly">Next</button><span id="plyMeta" class="sub"></span></div><div id="plyInfo" class="sub">Loading detailed line analysis...</div>';
     charts.gameEval?.destroy?.();
     charts.gameEval=new Chart(document.getElementById('gameEvalChart'),{type:'line',data:{labels:p.evals.map((_,ix)=>ix),datasets:[{label:'Eval cp',data:p.evals,borderColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false}});
+    const rows=await analyzeGameDetailed(filtered[i],current.user);
+    let idx=0;
+    const render=()=>{ if(!rows.length){ document.getElementById('plyInfo').textContent='No detailed line analysis available.'; return; } const r=rows[idx]; document.getElementById('plyMeta').textContent=`Ply ${r.ply}/${rows.length}`; document.getElementById('plyInfo').innerHTML=`Played: <b>${r.move}</b> | Eval: <b>${r.eval??'n/a'}</b> | Best: <b>${r.best}</b><br/>PV: ${r.pv||'-'}`; };
+    document.getElementById('prevPly').onclick=()=>{ idx=Math.max(0,idx-1); render(); };
+    document.getElementById('nextPly').onclick=()=>{ idx=Math.min(rows.length-1,idx+1); render(); };
+    render();
   }));
 }
 function updateProgressive(points, filtered, done, total){renderKpis(filtered);drawSkillGraph(points);drawOpponentSpread(points);drawVolume(points);drawResults(points);renderFeed(filtered,points);drawFeedDetails(filtered,points);setStatus(done<total?`Engine-evaluating ${done}/${total}...`:`Done. ${total} games plotted.`);const fallbackCount=points.filter(p=>p.usedFallback).length;
