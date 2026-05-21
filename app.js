@@ -500,10 +500,10 @@ async function evaluateGameMoveByMove(g,user,onProgress){
 
 function renderKpis(games){const wins=games.filter(g=>perspective(g,current.user).res==='win').length;const draws=games.filter(g=>DRAW_RESULTS.has(perspective(g,current.user).res)).length;const losses=games.length-wins-draws;els.kpis().innerHTML=[['Games in view',games.length],['W/D/L',`${wins}/${draws}/${losses}`],['Win rate',games.length?fmtPct(wins/games.length):'n/a'],['Cached evals',evalCache.size]].map(([k,v])=>`<div class='glass card'><div class='k'>${k}</div><div class='v'>${v}</div></div>`).join('');}
 function makeLineChart(el,config){return new Chart(el,{...config,options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{position:'top'},...(config.options?.plugins||{})},scales:config.options?.scales||{}}});}
-function drawSkillGraph(points){charts.skill?.destroy?.();charts.skill=makeLineChart(els.ratingChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Chess.com Elo',data:points.map(p=>p.myElo),borderColor:'#0071e3',yAxisID:'yChess'},{label:'Opponent Chess.com Elo',data:points.map(p=>p.oppElo),borderColor:'#8e8e93',yAxisID:'yChess'},{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37',yAxisID:'yEngine'},{label:'Opponent Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318',yAxisID:'yEngine'}]},options:{plugins:{title:{display:true,text:'Per-Game Skill Trend (Dual Axis)'}},scales:{yChess:{type:'linear',position:'left',title:{display:true,text:'Chess.com Elo'}},yEngine:{type:'linear',position:'right',grid:{drawOnChartArea:false},title:{display:true,text:'Engine Elo'}}}}});} 
-function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart(els.oppRatingChart(),{type:'scatter',data:{datasets:[{label:'Engine edge vs opponent Elo',data:points.filter(p=>p.myEng&&p.oppEng).map(p=>({x:p.oppElo,y:p.myEng-p.oppEng})),backgroundColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{title:{display:true,text:'Opponent Chess.com Elo'}},y:{title:{display:true,text:'Engine Elo edge'}}}}});}
+function drawSkillGraph(points){charts.skill?.destroy?.();charts.skill=makeLineChart(els.ratingChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Chess.com Elo',data:points.map(p=>p.myElo),borderColor:'#0071e3',yAxisID:'yChess'},{label:'Opponent Chess.com Elo',data:points.map(p=>p.oppElo),borderColor:'#8e8e93',yAxisID:'yChess'},{label:'Your Engine Accuracy %',data:points.map(p=>p.myAcc),borderColor:'#1a7f37',yAxisID:'yAcc'},{label:'Opponent Engine Accuracy %',data:points.map(p=>p.oppAcc),borderColor:'#b42318',yAxisID:'yAcc'}]},options:{plugins:{title:{display:true,text:'Per-Game Skill Trend (Chess.com Elo + Engine Accuracy %)'}},scales:{yChess:{type:'linear',position:'left',title:{display:true,text:'Chess.com Elo'}},yAcc:{type:'linear',position:'right',min:0,max:100,grid:{drawOnChartArea:false},title:{display:true,text:'Engine Accuracy %'}}}}});}
+function drawOpponentSpread(points){charts.opp?.destroy?.();charts.opp=new Chart(els.oppRatingChart(),{type:'scatter',data:{datasets:[{label:'Accuracy edge vs opponent Elo',data:points.filter(p=>p.myAcc!=null&&p.oppAcc!=null).map(p=>({x:p.oppElo,y:p.myAcc-p.oppAcc})),backgroundColor:'#0071e3'}]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{title:{display:true,text:'Opponent Chess.com Elo'}},y:{title:{display:true,text:'Your accuracy − opp accuracy (pp)'}}}}});}
 function drawVolume(points){charts.vol?.destroy?.();charts.vol=new Chart(els.volumeChart(),{type:'bar',data:{labels:points.map(p=>p.label),datasets:[{label:'Game index',data:points.map((_,i)=>i+1),backgroundColor:'#d6eaff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},title:{display:true,text:'Games in selection'}}}});} 
-function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Elo',data:points.map(p=>p.myEng),borderColor:'#1a7f37'},{label:'Opp Engine Elo',data:points.map(p=>p.oppEng),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Elo Comparison'}}}});} 
+function drawResults(points){charts.res?.destroy?.();charts.res=new Chart(els.resultChart(),{type:'line',data:{labels:points.map(p=>p.label),datasets:[{label:'Your Engine Accuracy %',data:points.map(p=>p.myAcc),borderColor:'#1a7f37'},{label:'Opp Engine Accuracy %',data:points.map(p=>p.oppAcc),borderColor:'#b42318'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{title:{display:true,text:'Engine Accuracy Comparison'}},scales:{y:{min:0,max:100,title:{display:true,text:'Accuracy %'}}}}});}
 function renderFeed(games,points){
   els.feedCount().textContent=`${games.length} games`;
   const feed=els.gamesFeed();
@@ -515,7 +515,9 @@ function renderFeed(games,points){
     const g=games[i], p=perspective(g,current.user), e=points[i];
     const d=new Date(g.end_time*1000).toISOString().slice(0,10);
     const src=e.source==='backend'?'B':(e.source==='local'?'L':'·');
-    return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>${src} Eng ${e.myEng??'-'}/${e.oppEng??'-'}${e.usedFallback?'*':''}</span></button>`;
+    const myA = e.myAcc!=null?`${e.myAcc.toFixed(0)}%`:'-';
+    const opA = e.oppAcc!=null?`${e.oppAcc.toFixed(0)}%`:'-';
+    return `<button class='game-row' data-idx='${i}'><span>${d}</span><span>${g.time_class}</span><span>${p.me.username} (${p.me.rating}) vs ${p.opp.username} (${p.opp.rating})</span><span class='${p.outcome.toLowerCase()}'>${p.outcome}</span><span class='tag'>${src} Acc ${myA}/${opA}${e.usedFallback?'*':''}</span></button>`;
   }).join('');
 }
 
@@ -1073,19 +1075,27 @@ function pointsFromGames(filtered,user){
     const p=perspective(g,user);
     return {label:`${new Date(g.end_time*1000).toISOString().slice(0,10)} #${i+1}`,
             myElo:p.me.rating||null, oppElo:p.opp.rating||null,
-            myEng:null, oppEng:null, evals:null,
+            myAcc:null, oppAcc:null, evals:null,
             usedFallback:false, nullEvals:0, engineEvals:0, source:null};
   });
 }
+// Compute per-game accuracy (Lichess formula) from the eval array we already have.
+function accFromEvals(evals, meWhite){
+  if(!Array.isArray(evals) || evals.length < 2) return {me:null, opp:null};
+  const ana = analyzeEvals(evals, meWhite);
+  return ana ? {me: ana.accuracy.me, opp: ana.accuracy.opp} : {me:null, opp:null};
+}
 function applyBackendRowToPoint(point, beRec){
   if(!beRec) return;
-  point.myEng = beRec.my_engine_elo!=null?Math.round(beRec.my_engine_elo):point.myEng;
-  point.oppEng = beRec.opp_engine_elo!=null?Math.round(beRec.opp_engine_elo):point.oppEng;
   if(Array.isArray(beRec.evals) && beRec.evals.length) point.evals = beRec.evals;
   point.usedFallback = !!beRec.used_fallback;
   point.nullEvals = beRec.null_evals||0;
   point.engineEvals = beRec.engine_evals||0;
   point.source = beRec.has_analysis ? 'backend' : point.source;
+  if(point.evals && beRec.me_white !== undefined){
+    const a = accFromEvals(point.evals, !!beRec.me_white);
+    point.myAcc = a.me; point.oppAcc = a.opp;
+  }
 }
 
 async function runBackend(user,range,timeClass,limit,token){
@@ -1155,13 +1165,14 @@ async function runBackend(user,range,timeClass,limit,token){
       try{
         const eng=await evaluateGameMoveByMove(filtered[i],user);
         if(eng){
-          points[i].myEng=Math.round(eng.myEngineElo);
-          points[i].oppEng=Math.round(eng.oppEngineElo);
           points[i].evals=eng.evals;
           points[i].usedFallback=!!eng.usedFallback;
           points[i].nullEvals=eng.nullEvals||0;
           points[i].engineEvals=eng.engineEvals||0;
           points[i].source=eng.source||'local';
+          const persp=perspective(filtered[i],user);
+          const a=accFromEvals(points[i].evals, !!persp.meWhite);
+          points[i].myAcc=a.me; points[i].oppAcc=a.opp;
           updateProgressive(points,filtered,i+1,filtered.length);
         }
       }catch(e){ console.warn('local fallback failed for game',i,e); }
@@ -1180,13 +1191,14 @@ async function runLocal(user,range,timeClass,limit,token){
     if(token!==runToken) return;
     setStatus(`Evaluating game ${i+1}/${filtered.length}...`);
     const eng=await evaluateGameMoveByMove(filtered[i],user,(mv,totalMv)=>{setStatus(`Evaluating game ${i+1}/${filtered.length} • move ${mv}/${totalMv}`);});
-    points[i].myEng=Math.round(eng.myEngineElo);
-    points[i].oppEng=Math.round(eng.oppEngineElo);
     points[i].evals=eng.evals;
-    points[i].usedFallback=!!eng.usedFallback || (Math.round(eng.myEngineElo)===500 && Math.round(eng.oppEngineElo)===500);
+    points[i].usedFallback=!!eng.usedFallback;
     points[i].nullEvals=eng.nullEvals||0;
     points[i].engineEvals=eng.engineEvals||0;
     points[i].source=eng.source||'local';
+    const persp=perspective(filtered[i],user);
+    const a=accFromEvals(points[i].evals, !!persp.meWhite);
+    points[i].myAcc=a.me; points[i].oppAcc=a.opp;
     updateProgressive(points,filtered,i+1,filtered.length);
   }
 }
