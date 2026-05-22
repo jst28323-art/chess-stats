@@ -82,7 +82,12 @@ const MAX_MS_PER_GAME=900000;
 // via CSS — the outlined "white-piece" glyphs (♔♕♖♗♘♙) read as empty
 // outlines on light squares. Filled glyphs + color:#fff + black stroke give
 // real white pieces that pop against either square color.
-const PIECE_SOLID={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
+// U+FE0E (variation selector-15) forces text presentation so the OS doesn't
+// substitute a color-emoji glyph, which would ignore CSS `color` and make
+// white pieces look black. Pair with an explicit text-symbol font stack.
+const VS15='︎';
+const PIECE_SOLID={p:'♟'+VS15,n:'♞'+VS15,b:'♝'+VS15,r:'♜'+VS15,q:'♛'+VS15,k:'♚'+VS15};
+const PIECE_FONT_FAMILY="'Segoe UI Symbol','Arial Unicode MS','Noto Sans Symbols 2','Noto Sans Symbols','DejaVu Sans',serif";
 const WHITE_STROKE='text-shadow:0 0 1px #000,1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000';
 const BLACK_STROKE='text-shadow:0 0 1px rgba(255,255,255,.4)';
 // ----- arrow + classification helpers (used by review panel) -----
@@ -199,7 +204,7 @@ function renderFenBoard(fen, flip=false){
         const glyph = PIECE_SOLID[ch.toLowerCase()]||'';
         const color = isWhite?'#ffffff':'#1d1d1f';
         const stroke = isWhite?WHITE_STROKE:BLACK_STROKE;
-        html+=`<div style="width:42px;height:42px;display:flex;align-items:center;justify-content:center;background:${dark?'#769656':'#eeeed2'}"><span style="font-size:32px;line-height:1;color:${color};${stroke}">${glyph}</span></div>`;
+        html+=`<div style="width:42px;height:42px;display:flex;align-items:center;justify-content:center;background:${dark?'#769656':'#eeeed2'}"><span style="font-family:${PIECE_FONT_FAMILY};font-size:32px;line-height:1;color:${color};${stroke}">${glyph}</span></div>`;
       }
     }
   }
