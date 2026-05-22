@@ -92,6 +92,29 @@ class StockfishSession:
         Eval is from White's perspective in centipawns, clamped to +/-1000 like
         the existing frontend.
         """
+        # Terminal positions short-circuit before stockfish. python-chess reports
+        # Mate(0) for "side to move is mated", whose sign is lost; trusting it
+        # would flip the eval bar at checkmate. Derive the winner from board
+        # state directly: the side whose turn it is has just been mated.
+        if board.is_checkmate():
+            winner_is_white = (board.turn == chess.BLACK)
+            return {
+                "eval_cp": 1000 if winner_is_white else -1000,
+                "mate": 0,
+                "bestmove_uci": None,
+                "bestmove_san": None,
+                "pv_uci": "",
+                "pv_san": "",
+            }
+        if board.is_stalemate() or board.is_insufficient_material():
+            return {
+                "eval_cp": 0,
+                "mate": None,
+                "bestmove_uci": None,
+                "bestmove_san": None,
+                "pv_uci": "",
+                "pv_san": "",
+            }
         limit = chess.engine.Limit(time=movetime_ms / 1000.0, depth=depth)
         info = self.engine.analyse(board, limit, multipv=1)
         if isinstance(info, list):
@@ -104,7 +127,15 @@ class StockfishSession:
             if pov.is_mate():
                 m = pov.mate()
                 mate = int(m) if m is not None else None
-                eval_cp = 1000 if (mate or 0) > 0 else -1000
+                if mate is not None and mate > 0:
+                    eval_cp = 1000
+                elif mate is not None and mate < 0:
+                    eval_cp = -1000
+                else:
+                    # Mate(0) reached outside the is_checkmate() short-circuit
+                    # above is unusual; fall back to "side-to-move just mated"
+                    # semantics — opposite side wins.
+                    eval_cp = -1000 if board.turn == chess.WHITE else 1000
             else:
                 cp = pov.score()
                 if cp is None:

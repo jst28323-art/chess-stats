@@ -288,6 +288,18 @@ def player_puzzles(
         g = rows_by_id.get(gid)
         if g is None:
             continue
+        total_plies = len(plies_list)
+        # If the user delivered checkmate on the final move, the historical
+        # eval bug (stockfish_adapter pre-fix) recorded the post-move eval as
+        # -1000 even when white mated — making it look like a missed_win. Skip
+        # that ply so users don't see "puzzles" for moves they actually won
+        # the game with.
+        me_white_game = (g.get("white_user") or "").lower() == username.lower()
+        user_won_by_mate_on_last_move = False
+        if me_white_game and g.get("black_result") == "checkmated":
+            user_won_by_mate_on_last_move = True
+        elif (not me_white_game) and g.get("white_result") == "checkmated":
+            user_won_by_mate_on_last_move = True
         for idx, p in enumerate(plies_list):
             if not p.get("me_moved"):
                 continue
@@ -313,6 +325,10 @@ def player_puzzles(
             if cp_before is None or cp_after is None:
                 continue
             mover_is_white = (played_ply % 2 == 1)
+            # Skip the last ply if the user delivered checkmate — the legacy
+            # eval bug records cp_after as the wrong sign (see notes above).
+            if played_ply == total_plies and user_won_by_mate_on_last_move:
+                continue
             cp_loss = max(0, (cp_before - cp_after) if mover_is_white else (cp_after - cp_before))
             cat = _puzzle_category(cp_loss, cp_before, cp_after, mover_is_white)
             if cat is None or cat not in wanted_cats:

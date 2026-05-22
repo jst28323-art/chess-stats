@@ -1455,9 +1455,31 @@ function drawFeedDetails(filtered,pointMap){
     for(const m of moves){ const mv=chess.move(m,{sloppy:true}); if(!mv) continue; fens.push(chess.fen()); caps.push(mv.captured?mv.captured:null); }
     let idx=0;
 
-    const updateEvalBar = (cp, mateVal) => {
+    const updateEvalBar = (cp, mateVal, fen) => {
+      // Detect terminal checkmate from the FEN itself so legacy data with the
+      // old Mate(0) bug still renders correctly: figure out the winner from
+      // whose-turn-it-is, ignoring the (possibly miscoded) cp/mateVal.
+      let terminalWinnerWhite = null;
+      try{
+        if(fen){
+          const ChessCtor = getChessCtor();
+          if(ChessCtor){
+            const g = new ChessCtor(fen);
+            if(g.in_checkmate && g.in_checkmate()){
+              // chess.js .turn() returns 'w' or 'b' for side-to-move; that side
+              // has been mated. The OPPOSITE side won.
+              terminalWinnerWhite = (g.turn() === 'b');
+            } else if(g.in_stalemate && (g.in_stalemate() || (g.insufficient_material && g.insufficient_material()))){
+              terminalWinnerWhite = 'draw';
+            }
+          }
+        }
+      } catch(e){ /* ignore */ }
       let pct;
-      if(mateVal != null){ pct = mateVal > 0 ? 100 : 0; }
+      if(terminalWinnerWhite === true){ pct = 100; }
+      else if(terminalWinnerWhite === false){ pct = 0; }
+      else if(terminalWinnerWhite === 'draw'){ pct = 50; }
+      else if(mateVal != null && mateVal !== 0){ pct = mateVal > 0 ? 100 : 0; }
       else if(cp == null){ pct = 50; }
       else { pct = Math.max(2, Math.min(98, cpToWinPct(cp))); }
       const ebW=document.getElementById('ebWhite'), ebB=document.getElementById('ebBlack');
@@ -1465,7 +1487,10 @@ function drawFeedDetails(filtered,pointMap){
       if(ebB) ebB.style.height = (100 - pct) + '%';
       const lbl=document.getElementById('ebLabel');
       if(lbl){
-        if(mateVal != null){ lbl.textContent = (mateVal>0?'+':'-') + 'M' + Math.abs(mateVal); }
+        if(terminalWinnerWhite === true){ lbl.textContent = '1-0'; }
+        else if(terminalWinnerWhite === false){ lbl.textContent = '0-1'; }
+        else if(terminalWinnerWhite === 'draw'){ lbl.textContent = '½-½'; }
+        else if(mateVal != null && mateVal !== 0){ lbl.textContent = (mateVal>0?'+':'-') + 'M' + Math.abs(mateVal); }
         else if(cp == null){ lbl.textContent = '—'; }
         else { const v = cp/100; lbl.textContent = (v>=0?'+':'') + v.toFixed(1); }
       }
@@ -1514,7 +1539,7 @@ function drawFeedDetails(filtered,pointMap){
       }
       drawArrowsOnBoard(boardHost, arrows, flipBoard);
 
-      updateEvalBar(cp, mate);
+      updateEvalBar(cp, mate, fen);
       updateChartHighlight();
       document.getElementById('plyMeta').textContent = `Ply ${idx}/${fens.length-1}`;
 
@@ -1533,7 +1558,23 @@ function drawFeedDetails(filtered,pointMap){
         }
       }
 
-      const evalLabel = mate!=null ? `M${Math.abs(mate)}` : (cp!=null ? cp : 'n/a');
+      // Eval label mirrors the eval-bar rule: terminal positions win/draw,
+      // signed mate only when nonzero, otherwise cp.
+      let evalLabel;
+      try{
+        const ChessCtor2 = getChessCtor();
+        if(ChessCtor2 && fen){
+          const gg = new ChessCtor2(fen);
+          if(gg.in_checkmate && gg.in_checkmate()){
+            evalLabel = (gg.turn() === 'b') ? '1-0' : '0-1';
+          } else if(gg.in_stalemate && gg.in_stalemate()){
+            evalLabel = '½-½';
+          }
+        }
+      } catch(e){ /* ignore */ }
+      if(evalLabel == null){
+        evalLabel = (mate!=null && mate !== 0) ? `${mate>0?'+':'-'}M${Math.abs(mate)}` : (cp!=null ? cp : 'n/a');
+      }
       // Explanation block: only when the played move wasn't best/brilliant
       // (in which case both `played_reason` and `best_reason` are populated
       // by the backend). Layered as two short lines under the main ply
