@@ -51,6 +51,37 @@ canvas{width:100% !important;height:100% !important;}
     .win{color:var(--good)} .loss{color:var(--bad)} .draw{color:#475467}
     .tag{font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
     .best{color:var(--good)} .inacc{color:#175cd3} .mist{color:var(--warn)} .blun{color:var(--bad)}
+    /* tabs */
+    .tabs{display:flex;gap:6px;margin:18px 4px 0;border-bottom:1px solid var(--line);overflow-x:auto;flex-wrap:nowrap;scrollbar-width:thin}
+    .tab-btn{background:transparent;color:var(--muted);border:none;box-shadow:none;font-weight:600;font-size:15px;padding:10px 14px;border-bottom:2px solid transparent;border-radius:0;cursor:pointer;white-space:nowrap}
+    .tab-btn:hover{color:var(--text)}
+    .tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
+    .tab-panel{display:none}
+    .tab-panel.active{display:block}
+    /* puzzle UI */
+    .puzzle-host{display:grid;grid-template-columns:auto 1fr;gap:18px;align-items:flex-start}
+    .puzzle-board{position:relative}
+    .puzzle-board .sq{cursor:pointer;user-select:none}
+    .puzzle-board .sq.sel{outline:3px solid #f2c200;outline-offset:-3px;z-index:2}
+    .puzzle-board .sq.hint{box-shadow:inset 0 0 0 3px rgba(0,113,227,.55)}
+    .puzzle-meta .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}
+    .puzzle-meta .pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--line);color:var(--muted)}
+    .puzzle-meta .pill.cat-blunder{color:#b42318;background:rgba(180,35,24,.10);border-color:#b4231833}
+    .puzzle-meta .pill.cat-mistake{color:#b54708;background:rgba(181,71,8,.10);border-color:#b5470833}
+    .puzzle-meta .pill.cat-inaccuracy{color:#175cd3;background:rgba(23,92,211,.10);border-color:#175cd333}
+    .puzzle-meta .pill.cat-missed_win{color:#1a7f37;background:rgba(26,127,55,.10);border-color:#1a7f3733}
+    .puzzle-meta .verdict-ok{color:var(--good);font-weight:700}
+    .puzzle-meta .verdict-bad{color:var(--bad);font-weight:700}
+    .puzzle-controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .puzzle-controls button{padding:8px 14px;font-size:13px}
+    .puzzle-controls .btn-secondary{background:#475467;box-shadow:0 6px 18px rgba(71,84,103,.32)}
+    .puzzle-controls .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line);box-shadow:none}
+    .puzzle-filter{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 14px}
+    .puzzle-filter label{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:var(--panel-solid);cursor:pointer}
+    .puzzle-filter input[type=checkbox]{accent-color:var(--accent)}
+    .puzzle-stats{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:13px;margin-top:8px}
+    .puzzle-stats b{color:var(--text)}
+    @media (max-width:780px){ .puzzle-host{grid-template-columns:1fr} }
     @media (max-width:980px){ .two-col{grid-template-columns:1fr} h1{font-size:34px} }
   </style>
 </head>
@@ -75,6 +106,14 @@ canvas{width:100% !important;height:100% !important;}
       <span id="backendJob" class="sub"></span>
     </div>
   </div>
+
+  <nav class="tabs" id="tabNav" role="tablist">
+    <button class="tab-btn active" type="button" data-tab="dashboard" role="tab" aria-selected="true">Dashboard</button>
+    <button class="tab-btn" type="button" data-tab="games" role="tab" aria-selected="false">Game Feed</button>
+    <button class="tab-btn" type="button" data-tab="puzzles" role="tab" aria-selected="false">Puzzles</button>
+  </nav>
+
+  <div class="tab-panel active" data-tab="dashboard" role="tabpanel">
 
   <div class="grid" id="kpis"></div>
 
@@ -126,14 +165,42 @@ canvas{width:100% !important;height:100% !important;}
     <div class="glass table-wrap"><table id="timeControlTable"></table></div>
   </section>
 
-  <section class="section">
-    <h3>Game Feed <span id="feedCount" class="sub"></span></h3>
-    <div class="two-col">
-      <div class="glass feed" id="gamesFeed"></div>
-      <div class="glass details" id="gameDetails"><div class="sub">Select a game for board + move-by-move engine review.</div></div>
-    </div>
-  </section>
+  </div> <!-- /dashboard tab-panel -->
+
+  <div class="tab-panel" data-tab="games" role="tabpanel">
+    <section class="section">
+      <h3>Game Feed <span id="feedCount" class="sub"></span></h3>
+      <div class="two-col">
+        <div class="glass feed" id="gamesFeed"></div>
+        <div class="glass details" id="gameDetails"><div class="sub">Select a game for board + move-by-move engine review.</div></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="tab-panel" data-tab="puzzles" role="tabpanel">
+    <section class="section">
+      <h3>Personalized Puzzles <span id="puzzleSourceCount" class="sub"></span></h3>
+      <p class="sub" style="margin:0 4px 10px">Positions from your own games where you missed the engine's best move. Find the move you should have played.</p>
+      <div class="puzzle-filter">
+        <label><input type="checkbox" data-cat="blunder" checked /> Blunders</label>
+        <label><input type="checkbox" data-cat="mistake" checked /> Mistakes</label>
+        <label><input type="checkbox" data-cat="inaccuracy" /> Inaccuracies</label>
+        <label><input type="checkbox" data-cat="missed_win" checked /> Missed wins</label>
+        <span style="width:8px"></span>
+        <label><input type="radio" name="puzzlePhase" value="all" checked /> All phases</label>
+        <label><input type="radio" name="puzzlePhase" value="opening" /> Opening</label>
+        <label><input type="radio" name="puzzlePhase" value="middlegame" /> Middlegame</label>
+        <label><input type="radio" name="puzzlePhase" value="endgame" /> Endgame</label>
+        <button id="puzzleReloadBtn" type="button" class="btn-secondary" style="padding:6px 14px;font-size:13px;background:#475467;box-shadow:0 6px 18px rgba(71,84,103,.32)">Reload</button>
+      </div>
+      <div class="glass" id="puzzlePanel" style="padding:16px">
+        <div class="sub">Loading puzzles…</div>
+      </div>
+      <div class="puzzle-stats" id="puzzleStats"></div>
+    </section>
+  </div>
+
 </div>
-<script src="app.js?v=2026-05-21.23"></script>
+<script src="app.js?v=2026-05-22.01"></script>
 </body>
 </html>

@@ -1750,3 +1750,302 @@ if(els.backendConnectBtn()){
   if(els.backendUrl()) els.backendUrl().value = BACKEND.url;
   run();
 })();
+
+// ------------------------- Tabs -------------------------
+(function initTabs(){
+  const nav = document.getElementById('tabNav'); if(!nav) return;
+  const panels = document.querySelectorAll('.tab-panel');
+  const stored = localStorage.getItem('activeTab') || 'dashboard';
+  function activate(name){
+    nav.querySelectorAll('.tab-btn').forEach(b=>{
+      const on = b.dataset.tab === name;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on?'true':'false');
+    });
+    panels.forEach(p=>p.classList.toggle('active', p.dataset.tab === name));
+    localStorage.setItem('activeTab', name);
+    if(name === 'puzzles' && !PUZZLES.loaded) loadPuzzles();
+  }
+  nav.addEventListener('click', e=>{
+    const btn = e.target.closest('.tab-btn'); if(!btn) return;
+    activate(btn.dataset.tab);
+  });
+  // Defer activation a tick so the rest of the app initialises first.
+  setTimeout(()=>activate(stored), 0);
+})();
+
+// ------------------------- Puzzles -------------------------
+const PUZZLES = {
+  loaded:false, list:[], idx:0,
+  current:null, fromSq:null, attemptShown:false, revealed:false,
+  stats:{solved:0, failed:0, skipped:0},
+};
+try {
+  const s = JSON.parse(localStorage.getItem('puzzleStats')||'null');
+  if(s && typeof s.solved==='number') PUZZLES.stats = s;
+} catch(e){}
+
+function persistPuzzleStats(){
+  try{ localStorage.setItem('puzzleStats', JSON.stringify(PUZZLES.stats)); }catch(e){}
+}
+function updatePuzzleStatsBar(){
+  const el = document.getElementById('puzzleStats'); if(!el) return;
+  const s = PUZZLES.stats; const total = s.solved+s.failed;
+  const pct = total ? Math.round(100*s.solved/total) : null;
+  el.innerHTML = `Session: <b>${s.solved}</b> solved · <b>${s.failed}</b> failed · <b>${s.skipped}</b> skipped${pct!=null?` · accuracy <b>${pct}%</b>`:''}`;
+}
+
+function selectedPuzzleCats(){
+  const cats = [];
+  document.querySelectorAll('.puzzle-filter input[data-cat]:checked').forEach(i=>cats.push(i.dataset.cat));
+  return cats.length ? cats : ['blunder','mistake','missed_win'];
+}
+function selectedPuzzlePhase(){
+  const r = document.querySelector('.puzzle-filter input[name=puzzlePhase]:checked');
+  return r ? r.value : 'all';
+}
+
+async function loadPuzzles(){
+  const panel = document.getElementById('puzzlePanel'); if(!panel) return;
+  const user = (els.username() && els.username().value || 'jst28323').trim();
+  if(!BACKEND.online){
+    panel.innerHTML = `<div class="sub">Puzzles need the backend (currently offline). Start your local backend and reload.</div>`;
+    return;
+  }
+  panel.innerHTML = `<div class="sub">Loading puzzles for <b>${user}</b>…</div>`;
+  const cats = selectedPuzzleCats().join(',');
+  const phase = selectedPuzzlePhase();
+  const url = `${BACKEND.url}/api/player/${encodeURIComponent(user)}/puzzles?categories=${encodeURIComponent(cats)}&phase=${encodeURIComponent(phase)}&limit=40`;
+  try{
+    const r = await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
+    const data = await r.json();
+    PUZZLES.list = data.puzzles||[];
+    PUZZLES.idx = 0; PUZZLES.loaded = true;
+    const sc = document.getElementById('puzzleSourceCount');
+    if(sc){
+      const totals = data.counts_by_category||{};
+      const parts = Object.entries(totals).map(([k,v])=>`${v} ${k.replace('_',' ')}`);
+      sc.textContent = `· ${data.total_candidates||0} candidate positions${parts.length?' ('+parts.join(', ')+')':''}`;
+    }
+    if(!PUZZLES.list.length){
+      panel.innerHTML = `<div class="sub">No puzzles match those filters. Try enabling more categories or analysing more games.</div>`;
+    } else {
+      renderCurrentPuzzle();
+    }
+    updatePuzzleStatsBar();
+  }catch(e){
+    panel.innerHTML = `<div class="sub" style="color:var(--bad)">Failed to load puzzles: ${e.message}</div>`;
+  }
+}
+
+function renderPuzzleBoardHtml(fen, flip){
+  // Like renderFenBoard but tags each square with data-sq for click handling
+  // and wraps the grid in a host with class .puzzle-board.
+  const board = fen.split(' ')[0].split('/').map(rank=>{
+    const out=[]; for(const ch of rank){
+      if(/\d/.test(ch)){ for(let k=0;k<Number(ch);k++) out.push(null); } else out.push(ch);
+    } return out;
+  });
+  const rankOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+  const fileOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+  let html='<div class="puzzle-board" style="display:grid;grid-template-columns:repeat(8,44px);gap:0;border:1px solid #999;width:max-content;border-radius:6px;overflow:hidden">';
+  for(const r of rankOrder){
+    for(const f of fileOrder){
+      const dark=(r+f)%2===1;
+      const ch=board[r][f];
+      const sqName = String.fromCharCode(97+f) + String(8-r);
+      const bg = dark ? '#769656' : '#eeeed2';
+      if(!ch){
+        html+=`<div class="sq" data-sq="${sqName}" style="width:44px;height:44px;background:${bg}"></div>`;
+      } else {
+        const isWhite = ch===ch.toUpperCase();
+        const glyph = PIECE_SOLID[ch.toLowerCase()]||'';
+        const color = isWhite?'#ffffff':'#1d1d1f';
+        const stroke = isWhite?WHITE_STROKE:BLACK_STROKE;
+        html+=`<div class="sq" data-sq="${sqName}" style="width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:${bg}"><span style="font-family:${PIECE_FONT_FAMILY};font-size:34px;line-height:1;color:${color};pointer-events:none;${stroke}">${glyph}</span></div>`;
+      }
+    }
+  }
+  html+='</div>'; return html;
+}
+
+function renderCurrentPuzzle(){
+  const panel = document.getElementById('puzzlePanel'); if(!panel) return;
+  if(!PUZZLES.list.length){ panel.innerHTML = '<div class="sub">No puzzles loaded.</div>'; return; }
+  const p = PUZZLES.list[PUZZLES.idx];
+  PUZZLES.current = p;
+  PUZZLES.fromSq = null; PUZZLES.attemptShown = false; PUZZLES.revealed = false;
+  const flip = (p.side_to_move === 'black');
+  const stm = p.side_to_move === 'white' ? 'White' : 'Black';
+  const opp = p.opponent || 'opponent';
+  const dateStr = p.end_time ? new Date(p.end_time*1000).toLocaleDateString() : '';
+  const catClass = `cat-${p.category}`;
+  const catLabel = p.category.replace('_',' ');
+  panel.innerHTML = `
+    <div class="puzzle-host">
+      <div id="puzzleBoardHost">${renderPuzzleBoardHtml(p.puzzle_fen, flip)}</div>
+      <div class="puzzle-meta">
+        <div class="row">
+          <span class="pill ${catClass}">${catLabel}</span>
+          <span class="pill">${p.phase}</span>
+          <span class="pill">vs ${opp}</span>
+          ${p.opening_name?`<span class="pill" title="opening">${p.opening_name}</span>`:''}
+          <span class="sub" style="margin-left:auto">${PUZZLES.idx+1} / ${PUZZLES.list.length}${dateStr?' · '+dateStr:''}</span>
+        </div>
+        <div style="font-size:18px;font-weight:650;margin:4px 0">${stm} to move — find the best move.</div>
+        <div class="sub" id="puzzleHint">Click a piece, then a destination square.</div>
+        <div id="puzzleVerdict" style="margin-top:10px;min-height:22px"></div>
+        <div id="puzzleSolution" style="margin-top:8px"></div>
+        <div class="puzzle-controls">
+          <button id="puzzlePrevBtn" type="button" class="btn-ghost">← Previous</button>
+          <button id="puzzleNextBtn" type="button">Next →</button>
+          <button id="puzzleRevealBtn" type="button" class="btn-secondary">Reveal</button>
+          <button id="puzzleSkipBtn" type="button" class="btn-ghost">Skip</button>
+          ${p.game_url?`<a href="${p.game_url}" target="_blank" rel="noopener" class="sub" style="align-self:center;margin-left:6px">open game ↗</a>`:''}
+        </div>
+      </div>
+    </div>`;
+  attachPuzzleHandlers();
+  updatePuzzleStatsBar();
+}
+
+function attachPuzzleHandlers(){
+  const host = document.getElementById('puzzleBoardHost');
+  if(host){
+    host.addEventListener('click', onPuzzleSquareClick);
+  }
+  const next = document.getElementById('puzzleNextBtn');
+  const prev = document.getElementById('puzzlePrevBtn');
+  const rev = document.getElementById('puzzleRevealBtn');
+  const skip = document.getElementById('puzzleSkipBtn');
+  if(next) next.addEventListener('click',()=>advancePuzzle(+1));
+  if(prev) prev.addEventListener('click',()=>advancePuzzle(-1));
+  if(rev) rev.addEventListener('click', revealCurrentPuzzle);
+  if(skip) skip.addEventListener('click',()=>{ PUZZLES.stats.skipped++; persistPuzzleStats(); advancePuzzle(+1); });
+}
+
+function advancePuzzle(delta){
+  if(!PUZZLES.list.length) return;
+  PUZZLES.idx = (PUZZLES.idx + delta + PUZZLES.list.length) % PUZZLES.list.length;
+  renderCurrentPuzzle();
+}
+
+function clearBoardSelection(){
+  document.querySelectorAll('.puzzle-board .sq.sel').forEach(el=>el.classList.remove('sel'));
+}
+
+function onPuzzleSquareClick(e){
+  const cell = e.target.closest('.sq'); if(!cell) return;
+  const sq = cell.dataset.sq; if(!sq) return;
+  const p = PUZZLES.current; if(!p || PUZZLES.attemptShown || PUZZLES.revealed) return;
+  if(typeof Chess === 'undefined'){
+    setPuzzleHint('Chess engine library not loaded — refresh and try again.', 'bad');
+    return;
+  }
+  const game = new Chess(p.puzzle_fen);
+  if(PUZZLES.fromSq == null){
+    // first click: must select a piece of the side to move
+    const piece = game.get(sq);
+    if(!piece) return;
+    const stmCode = p.side_to_move === 'white' ? 'w' : 'b';
+    if(piece.color !== stmCode){
+      setPuzzleHint(`That's the opponent's piece. Pick a ${p.side_to_move} piece.`, 'warn');
+      return;
+    }
+    PUZZLES.fromSq = sq;
+    clearBoardSelection();
+    cell.classList.add('sel');
+    setPuzzleHint(`Selected ${sq}. Now click the destination.`, 'muted');
+    return;
+  }
+  // second click: build move (auto-promote to queen)
+  const from = PUZZLES.fromSq;
+  if(sq === from){ clearBoardSelection(); PUZZLES.fromSq=null; setPuzzleHint('Selection cleared.', 'muted'); return; }
+  const movingPiece = game.get(from);
+  const promotionRank = (movingPiece && movingPiece.type==='p' && ((movingPiece.color==='w' && sq[1]==='8') || (movingPiece.color==='b' && sq[1]==='1')));
+  const moveObj = { from, to: sq };
+  if(promotionRank) moveObj.promotion = 'q';
+  const legal = game.move(moveObj);
+  if(!legal){
+    // maybe they re-clicked another own piece to switch selection
+    const newPiece = game.get(sq);
+    const stmCode = p.side_to_move === 'white' ? 'w' : 'b';
+    if(newPiece && newPiece.color === stmCode){
+      PUZZLES.fromSq = sq;
+      clearBoardSelection();
+      cell.classList.add('sel');
+      setPuzzleHint(`Selected ${sq}. Now click the destination.`, 'muted');
+      return;
+    }
+    setPuzzleHint('Illegal move. Try again.', 'bad');
+    PUZZLES.fromSq = null; clearBoardSelection();
+    return;
+  }
+  // Build UCI form to compare with best_uci. Note chess.js gives us SAN; for
+  // UCI we need from+to+promotion suffix.
+  const tryUci = from + sq + (promotionRank ? 'q' : '');
+  judgePuzzleAttempt(tryUci, legal.san);
+}
+
+function setPuzzleHint(text, kind){
+  const el = document.getElementById('puzzleHint'); if(!el) return;
+  el.textContent = text;
+  el.style.color = kind==='bad'?'var(--bad)':kind==='good'?'var(--good)':kind==='warn'?'var(--warn)':'var(--muted)';
+}
+
+function judgePuzzleAttempt(triedUci, triedSan){
+  const p = PUZZLES.current; if(!p) return;
+  const verdict = document.getElementById('puzzleVerdict');
+  const solution = document.getElementById('puzzleSolution');
+  PUZZLES.attemptShown = true;
+  clearBoardSelection();
+  PUZZLES.fromSq = null;
+  if(triedUci === p.best_uci){
+    PUZZLES.stats.solved++; persistPuzzleStats();
+    verdict.innerHTML = `<span class="verdict-ok">✓ Correct — ${triedSan}</span> is the engine's best move.`;
+    solution.innerHTML = p.best_reason ? `<div class="sub">${p.best_reason}</div>` : '';
+    if(p.pv_san){ solution.innerHTML += `<div class="sub" style="margin-top:4px">Continuation: ${p.pv_san}</div>`; }
+    setPuzzleHint('Solved. Next puzzle ready.', 'good');
+  } else {
+    PUZZLES.stats.failed++; persistPuzzleStats();
+    verdict.innerHTML = `<span class="verdict-bad">✗ Not best — ${triedSan}.</span> Best was <b>${p.best_san}</b>.`;
+    const reasons = [];
+    if(p.best_reason) reasons.push(`<b>Why best:</b> ${p.best_reason}`);
+    if(p.played_uci === triedUci && p.played_reason) reasons.push(`<b>Why ${p.played_san} fails:</b> ${p.played_reason}`);
+    if(p.pv_san) reasons.push(`<b>Continuation after best:</b> ${p.pv_san}`);
+    solution.innerHTML = reasons.length ? `<div class="sub">${reasons.join('<br>')}</div>` : '';
+    setPuzzleHint('Click Next to continue, or Reveal for full details.', 'muted');
+  }
+  updatePuzzleStatsBar();
+}
+
+function revealCurrentPuzzle(){
+  const p = PUZZLES.current; if(!p) return;
+  if(!PUZZLES.attemptShown){
+    PUZZLES.stats.failed++; persistPuzzleStats();
+  }
+  PUZZLES.attemptShown = true; PUZZLES.revealed = true;
+  const verdict = document.getElementById('puzzleVerdict');
+  const solution = document.getElementById('puzzleSolution');
+  verdict.innerHTML = `<span class="sub">Best move:</span> <b>${p.best_san}</b> &nbsp;<span class="sub">you played:</span> <b>${p.played_san}</b> &nbsp;<span class="sub">(−${p.cp_loss}cp)</span>`;
+  const reasons = [];
+  if(p.best_reason) reasons.push(`<b>Why ${p.best_san}:</b> ${p.best_reason}`);
+  if(p.played_reason) reasons.push(`<b>Why ${p.played_san} fails:</b> ${p.played_reason}`);
+  if(p.pv_san) reasons.push(`<b>Continuation:</b> ${p.pv_san}`);
+  solution.innerHTML = reasons.length ? `<div class="sub">${reasons.join('<br>')}</div>` : '';
+  // Highlight best move squares on the board.
+  if(p.best_uci && p.best_uci.length>=4){
+    const a = p.best_uci.slice(0,2), b = p.best_uci.slice(2,4);
+    document.querySelectorAll('.puzzle-board .sq').forEach(el=>{
+      if(el.dataset.sq===a || el.dataset.sq===b) el.classList.add('hint');
+    });
+  }
+  updatePuzzleStatsBar();
+}
+
+// Filter changes trigger reload.
+document.querySelectorAll('.puzzle-filter input').forEach(inp=>{
+  inp.addEventListener('change',()=>{ PUZZLES.loaded=false; if(document.querySelector('.tab-panel.active')?.dataset.tab==='puzzles') loadPuzzles(); });
+});
+const reloadBtn = document.getElementById('puzzleReloadBtn');
+if(reloadBtn) reloadBtn.addEventListener('click',()=>{ PUZZLES.loaded=false; loadPuzzles(); });

@@ -7,18 +7,22 @@ Endpoints:
   GET  /api/player/{username}/games
   GET  /api/game/{game_id}/analysis
   GET  /api/player/{username}/summary
+  GET  /api/player/{username}/puzzles
 
 Run with:
   uvicorn backend.main:app --host 0.0.0.0 --port 8787
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+import random
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import chess
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -208,6 +212,155 @@ def game_analysis(game_id: str) -> dict[str, Any]:
         "opening_ply": analysis.get("opening_ply") or 0,
         "opening_next_uci": analysis.get("opening_next_uci"),
         "error": analysis.get("error"),
+    }
+
+
+_PUZZLE_CATEGORIES = {"blunder", "mistake", "inaccuracy", "missed_win"}
+_STARTING_FEN = chess.STARTING_FEN
+
+
+def _puzzle_category(cp_loss: int, cp_before: int, cp_after: int, mover_is_white: bool) -> str | None:
+    """Bucket a non-best move into a puzzle category.
+
+    cp_loss is from the mover's perspective. missed_win = mover had a winning
+    eval (>=200cp in their favour) before the move and threw it away. Otherwise
+    fall back to standard cp_loss thresholds.
+    """
+    pre_signed = cp_before if mover_is_white else -cp_before
+    post_signed = cp_after if mover_is_white else -cp_after
+    if pre_signed >= 200 and post_signed < pre_signed - 150 and post_signed < 200:
+        return "missed_win"
+    if cp_loss >= 200:
+        return "blunder"
+    if cp_loss >= 100:
+        return "mistake"
+    if cp_loss >= 50:
+        return "inaccuracy"
+    return None
+
+
+def _phase_for_ply(ply: int, opening_ply: int | None) -> str:
+    book_end = max(int(opening_ply or 0), 16)
+    if ply <= book_end:
+        return "opening"
+    if ply <= 50:
+        return "middlegame"
+    return "endgame"
+
+
+@app.get("/api/player/{username}/puzzles")
+def player_puzzles(
+    username: str,
+    range: str = "all",
+    timeClass: str = "all",
+    categories: str = "blunder,mistake,missed_win",
+    phase: str = "all",
+    limit: int = 20,
+    games_limit: int = 250,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Mine the user's analysed games for personalized puzzles.
+
+    A puzzle is a position right before a non-best move the user actually
+    played, where they get a chance to find the engine's best move instead.
+    """
+    wanted_cats = {c.strip() for c in categories.split(",") if c.strip()}
+    wanted_cats &= _PUZZLE_CATEGORIES
+    if not wanted_cats:
+        wanted_cats = {"blunder", "mistake", "missed_win"}
+    wanted_phases = {"opening", "middlegame", "endgame"} if phase == "all" else {phase}
+
+    rows = db.get_player_games(username, range, timeClass, max(games_limit, limit * 5))
+    analyses = db.get_analyses_for_games((r["game_id"] for r in rows), worker.ENGINE_PROFILE)
+    rows_by_id = {r["game_id"]: r for r in rows}
+
+    import json as _json
+    candidates: list[dict[str, Any]] = []
+    for gid, a in analyses.items():
+        if a.get("error"):
+            continue
+        plies_list = _json.loads(a.get("plies_json") or "[]")
+        if not plies_list:
+            continue
+        evals = a.get("evals") or []
+        opening_ply = a.get("opening_ply") or 0
+        opening_name = a.get("opening_name")
+        g = rows_by_id.get(gid)
+        if g is None:
+            continue
+        for idx, p in enumerate(plies_list):
+            if not p.get("me_moved"):
+                continue
+            if p.get("is_best"):
+                continue
+            best_uci = p.get("best_uci")
+            if not best_uci:
+                continue
+            played_ply = int(p.get("ply") or (idx + 1))
+            # Position BEFORE the played move: it's plies[idx-1].fen, or the
+            # starting position when this is the first move.
+            if idx == 0:
+                puzzle_fen = _STARTING_FEN
+            else:
+                prev = plies_list[idx - 1]
+                puzzle_fen = prev.get("fen") or _STARTING_FEN
+            # evals[0] = starting position; evals[k] = after ply k. So
+            # cp_before = evals[played_ply - 1], cp_after = evals[played_ply].
+            if played_ply - 1 >= len(evals) or played_ply >= len(evals):
+                continue
+            cp_before = int(evals[played_ply - 1]) if evals[played_ply - 1] is not None else None
+            cp_after = int(evals[played_ply]) if evals[played_ply] is not None else None
+            if cp_before is None or cp_after is None:
+                continue
+            mover_is_white = (played_ply % 2 == 1)
+            cp_loss = max(0, (cp_before - cp_after) if mover_is_white else (cp_after - cp_before))
+            cat = _puzzle_category(cp_loss, cp_before, cp_after, mover_is_white)
+            if cat is None or cat not in wanted_cats:
+                continue
+            ph = _phase_for_ply(played_ply, opening_ply)
+            if ph not in wanted_phases:
+                continue
+            puzzle_id = hashlib.sha1(f"{gid}:{played_ply}".encode()).hexdigest()[:16]
+            candidates.append({
+                "puzzle_id": puzzle_id,
+                "game_id": gid,
+                "game_url": g["game_url"],
+                "end_time": g["end_time"],
+                "time_class": g["time_class"],
+                "opponent": g["black_user"] if (g.get("white_user", "").lower() == username.lower()) else g["white_user"],
+                "ply": played_ply,
+                "puzzle_fen": puzzle_fen,
+                "side_to_move": "white" if mover_is_white else "black",
+                "best_uci": best_uci,
+                "best_san": p.get("best") or best_uci,
+                "played_uci": p.get("uci"),
+                "played_san": p.get("move"),
+                "cp_before": cp_before,
+                "cp_after_played": cp_after,
+                "cp_loss": cp_loss,
+                "category": cat,
+                "phase": ph,
+                "best_reason": p.get("best_reason"),
+                "played_reason": p.get("played_reason"),
+                "pv_san": p.get("pv") or "",
+                "opening_name": opening_name,
+            })
+
+    rng = random.Random(seed if seed is not None else int(time.time()))
+    # Prefer larger cp_loss first (more instructive), but inject randomness so
+    # repeated calls don't always show the same top items.
+    candidates.sort(key=lambda c: (-c["cp_loss"], rng.random()))
+    chosen = candidates[: max(1, min(limit, 100))]
+
+    counts: dict[str, int] = {}
+    for c in candidates:
+        counts[c["category"]] = counts.get(c["category"], 0) + 1
+    return {
+        "username": username,
+        "engine_profile": worker.ENGINE_PROFILE,
+        "total_candidates": len(candidates),
+        "counts_by_category": counts,
+        "puzzles": chosen,
     }
 
 
