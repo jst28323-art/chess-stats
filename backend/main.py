@@ -171,6 +171,9 @@ def player_games(
             "evals": a["evals"] if a else None,
             "has_analysis": a is not None and a.get("error") is None,
             "analysis_error": a.get("error") if a else None,
+            "opening_eco": a.get("opening_eco") if a else None,
+            "opening_name": a.get("opening_name") if a else None,
+            "opening_ply": a.get("opening_ply") if a else None,
         })
     return {
         "username": username,

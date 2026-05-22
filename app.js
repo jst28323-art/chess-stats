@@ -771,7 +771,83 @@ function aggregateInsights(filtered, points, user){
     weekdayStats, hourStats, byTimeControl,
     competitivePlies: totalCompetitive, decidedPlies: totalDecided,
     conversionByPly: byPly,
+    openingStats: computeOpeningStats(valid),
+    oppStrengthStats: computeOppStrengthStats(valid),
+    positionTypeStats: computePositionTypeStats(valid),
   };
+}
+
+// === New insight helpers ===========================================
+function computeOpeningStats(valid){
+  const map = new Map();
+  for(const v of valid){
+    const name = v.point.opening_name; if(!name) continue;
+    if(!map.has(name)) map.set(name, {
+      eco: v.point.opening_eco || '', name,
+      n:0, wins:0, draws:0, losses:0,
+      accSum:0, accN:0,
+      asWhite:0, asBlack:0,
+      lastBookPly:0, lastBookN:0,
+    });
+    const o = map.get(name);
+    o.n++;
+    if(v.persp.outcome==='Win') o.wins++;
+    else if(v.persp.outcome==='Draw') o.draws++;
+    else o.losses++;
+    if(v.persp.meWhite) o.asWhite++; else o.asBlack++;
+    if(v.analytics.accuracy.me != null){ o.accSum += v.analytics.accuracy.me; o.accN++; }
+    if(v.point.opening_ply){ o.lastBookPly += v.point.opening_ply; o.lastBookN++; }
+  }
+  return map;
+}
+function computeOppStrengthStats(valid){
+  const buckets = {
+    weaker:   {label:'Opponent 100+ Elo weaker', n:0, wins:0, draws:0, losses:0, accSum:0, accN:0},
+    similar:  {label:'Opponent within ±100 Elo', n:0, wins:0, draws:0, losses:0, accSum:0, accN:0},
+    stronger: {label:'Opponent 100+ Elo stronger', n:0, wins:0, draws:0, losses:0, accSum:0, accN:0},
+  };
+  for(const v of valid){
+    const my = v.persp.me && v.persp.me.rating, op = v.persp.opp && v.persp.opp.rating;
+    if(!my || !op) continue;
+    const delta = my - op;
+    const b = delta > 100 ? buckets.weaker : delta < -100 ? buckets.stronger : buckets.similar;
+    b.n++;
+    if(v.persp.outcome==='Win') b.wins++;
+    else if(v.persp.outcome==='Draw') b.draws++;
+    else b.losses++;
+    if(v.analytics.accuracy.me != null){ b.accSum += v.analytics.accuracy.me; b.accN++; }
+  }
+  return buckets;
+}
+function computePositionTypeStats(valid){
+  // Per-ply accuracy bucketed by the eval BEFORE the move (from your POV).
+  const buckets = [
+    {key:'lost',     label:'Lost (≤−300)',          min:-Infinity, max:-300, accSum:0, accN:0, blun:0, plays:0},
+    {key:'losing',   label:'Losing (−300..−100)',  min:-300, max:-100, accSum:0, accN:0, blun:0, plays:0},
+    {key:'equal',    label:'Equal (−100..+100)',   min:-100, max:100,  accSum:0, accN:0, blun:0, plays:0},
+    {key:'better',   label:'Better (+100..+300)',  min:100,  max:300,  accSum:0, accN:0, blun:0, plays:0},
+    {key:'winning',  label:'Winning (≥+300)',       min:300,  max:Infinity, accSum:0, accN:0, blun:0, plays:0},
+  ];
+  for(const v of valid){
+    const evals = v.point.evals || []; if(evals.length < 2) continue;
+    const meWhite = v.persp.meWhite;
+    const wins = evals.map(cp=>cpToWinPct(cp));
+    for(let i=1; i<evals.length; i++){
+      const whiteMoved = ((i-1)%2 === 0);
+      const meMoved = (meWhite && whiteMoved) || (!meWhite && !whiteMoved);
+      if(!meMoved) continue;
+      const prev = evals[i-1];
+      const myCp = meWhite ? prev : -prev;  // from your POV
+      const b = buckets.find(x => myCp >= x.min && myCp < x.max);
+      if(!b) continue;
+      const cp = evals[i];
+      const loss = whiteMoved ? Math.max(0, prev-cp) : Math.max(0, cp-prev);
+      const acc = _moveAcc(wins[i-1], wins[i], meWhite);
+      b.accSum += acc; b.accN++; b.plays++;
+      if(loss >= CP_BLUNDER) b.blun++;
+    }
+  }
+  return buckets;
 }
 
 function generateCoachNotes(ins){
@@ -825,6 +901,63 @@ function generateCoachNotes(ins){
   if(ins.topBlunders.length){
     const tb=ins.topBlunders[0];
     n.push(`Worst single move cost ${tb.cpLoss} cp vs ${tb.opp} (${tb.outcome}). Click "Top blunders" below to review.`);
+  }
+  // --- Opening repertoire insights ---
+  if(ins.openingStats && ins.openingStats.size){
+    const ranked = [...ins.openingStats.values()].filter(o=>o.n>=3);
+    if(ranked.length >= 2){
+      const best  = [...ranked].sort((a,b)=> (b.wins/b.n) - (a.wins/a.n))[0];
+      const worst = [...ranked].sort((a,b)=> (a.wins/a.n) - (b.wins/b.n))[0];
+      if((best.wins/best.n) - (worst.wins/worst.n) > 0.25){
+        n.push(`Best opening: ${best.name} (${(best.wins/best.n*100).toFixed(0)}% over ${best.n} games). Weakest: ${worst.name} (${(worst.wins/worst.n*100).toFixed(0)}% over ${worst.n}) — consider studying lines against this or avoiding it where you have transposition options.`);
+      }
+    }
+  }
+  // --- Opponent strength insights ---
+  if(ins.oppStrengthStats){
+    const o = ins.oppStrengthStats;
+    if(o.stronger.n >= 5){
+      const rate = o.stronger.wins/o.stronger.n*100;
+      if(rate >= 35) n.push(`You hold your own vs higher-rated opponents (${rate.toFixed(0)}% over ${o.stronger.n} games at +100 Elo gap or more) — your ceiling is higher than your current rating suggests.`);
+      else if(rate <= 20) n.push(`Stronger opponents are tough: ${rate.toFixed(0)}% in ${o.stronger.n} games vs +100 Elo or higher. Mostly an experience gap; pattern recognition catches up over time.`);
+    }
+    if(o.weaker.n >= 5){
+      const rate = o.weaker.wins/o.weaker.n*100;
+      if(rate <= 60) n.push(`You drop more games to weaker opponents than expected (${rate.toFixed(0)}% over ${o.weaker.n} games at −100 Elo gap or worse). Usually a focus/tilt issue — slow down vs opponents you "should" beat.`);
+    }
+    // Accuracy gap across buckets
+    const accs = ['weaker','similar','stronger'].map(k=>({k, acc: o[k].accN ? o[k].accSum/o[k].accN : null, n: o[k].n})).filter(x=>x.acc!=null && x.n>=3);
+    if(accs.length >= 2){
+      const max = accs.reduce((a,b)=>a.acc>b.acc?a:b);
+      const min = accs.reduce((a,b)=>a.acc<b.acc?a:b);
+      if(max.acc - min.acc > 5){
+        const labelMap = {weaker:'weaker opponents', similar:'peers', stronger:'stronger opponents'};
+        n.push(`Accuracy swings by opponent strength: ${max.acc.toFixed(1)}% vs ${labelMap[max.k]} but only ${min.acc.toFixed(1)}% vs ${labelMap[min.k]} (Δ${(max.acc-min.acc).toFixed(1)}). ${min.k==='stronger'?'Expected — harder positions force harder choices.':min.k==='weaker'?'You may be coasting in easy games and missing tactics.':'Worth investigating.'}`);
+      }
+    }
+  }
+  // --- Position-type insights ---
+  if(ins.positionTypeStats){
+    const equal = ins.positionTypeStats.find(b=>b.key==='equal');
+    const winning = ins.positionTypeStats.find(b=>b.key==='winning');
+    const better = ins.positionTypeStats.find(b=>b.key==='better');
+    const losing = ins.positionTypeStats.find(b=>b.key==='losing');
+    if(equal && equal.accN >= 10){
+      const eqAcc = equal.accSum/equal.accN;
+      n.push(`Equal positions: ${eqAcc.toFixed(1)}% accuracy across ${equal.accN} moves. ${eqAcc<60?'Critical-moment decisions are your biggest leak — these are the moves that flip games.':eqAcc>75?'You handle complexity well; most losses come from elsewhere.':''}`);
+    }
+    if(winning && winning.accN >= 10 && better && better.accN >= 10){
+      const winAcc = winning.accSum/winning.accN, betAcc = better.accSum/better.accN;
+      if(winAcc - betAcc > 8){
+        n.push(`Cleaner technique once you're clearly winning (${winAcc.toFixed(1)}% vs ${betAcc.toFixed(1)}% in slight-advantage positions) — you need to convert the slight edge to a big one before relaxing.`);
+      } else if(winAcc - betAcc < -8){
+        n.push(`You play slight-advantage positions sharper than fully-winning ones (${betAcc.toFixed(1)}% vs ${winAcc.toFixed(1)}%) — you may be relaxing once the position simplifies.`);
+      }
+    }
+    if(losing && losing.accN >= 10){
+      const losAcc = losing.accSum/losing.accN;
+      if(losAcc > 75) n.push(`You defend losing positions well (${losAcc.toFixed(1)}% accuracy when down 1–3 pawns) — a sign of good resilience instinct.`);
+    }
   }
   return n;
 }
@@ -950,6 +1083,75 @@ function drawConversionChart(ins){
     },
   });
 }
+function drawPositionTypeChart(ins){
+  const buckets = ins.positionTypeStats || [];
+  const labels = buckets.map(b=>b.label);
+  const accs = buckets.map(b => b.accN ? b.accSum/b.accN : null);
+  const blun = buckets.map(b => b.plays ? (b.blun/b.plays*100) : null);
+  charts.posType?.destroy?.();
+  charts.posType = new Chart(document.getElementById('positionTypeChart'),{
+    data:{labels, datasets:[
+      {type:'bar',  label:'Accuracy %', data:accs, backgroundColor:'#0071e3', yAxisID:'yA', borderRadius:4},
+      {type:'line', label:'Blunder rate %', data:blun, borderColor:'#b42318', backgroundColor:'rgba(180,35,24,.1)', tension:0.2, yAxisID:'yB'},
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{title:{display:true,text:'How you play by position type (your moves only)'}, legend:{position:'top'}},
+      scales:{
+        yA:{type:'linear',position:'left',min:0,max:100,title:{display:true,text:'Accuracy %'}},
+        yB:{type:'linear',position:'right',min:0,max:Math.max(30, Math.ceil(Math.max(...blun.filter(x=>x!=null),0)/5)*5),title:{display:true,text:'Blunder %'},grid:{drawOnChartArea:false}},
+      },
+    },
+  });
+}
+
+function renderOpeningTable(ins){
+  const m = ins.openingStats; const t = document.getElementById('openingTable'); if(!t) return;
+  if(!m || !m.size){ t.innerHTML='<tr><td>No opening data yet</td></tr>'; return; }
+  const MIN_GAMES = 3;
+  const rows = [...m.values()].filter(o=>o.n>=MIN_GAMES).sort((a,b)=>b.n-a.n);
+  if(!rows.length){
+    t.innerHTML = `<tr><td>No opening with ≥${MIN_GAMES} games yet</td></tr>`;
+  } else {
+    const out = ['<tr><th>ECO</th><th>Opening</th><th>Games</th><th>W/D/L</th><th>Win %</th><th>Avg accuracy</th><th>Color split (W/B)</th></tr>'];
+    for(const o of rows){
+      const winRate = (o.wins/o.n*100).toFixed(0);
+      const acc = o.accN ? (o.accSum/o.accN).toFixed(1)+'%' : '—';
+      const winClass = (o.wins/o.n) >= 0.6 ? 'win' : (o.wins/o.n) <= 0.35 ? 'loss' : 'draw';
+      out.push(`<tr><td>${o.eco||'—'}</td><td>${o.name}</td><td>${o.n}</td><td>${o.wins}/${o.draws}/${o.losses}</td><td class="${winClass}">${winRate}%</td><td>${acc}</td><td>${o.asWhite}/${o.asBlack}</td></tr>`);
+    }
+    t.innerHTML = out.join('');
+  }
+  // Top cards: best/worst openings (≥MIN_GAMES, by win rate)
+  const ranked = [...m.values()].filter(o=>o.n>=MIN_GAMES);
+  const host = document.getElementById('openingTopCards'); if(!host) return;
+  if(ranked.length < 2){ host.innerHTML=''; return; }
+  const best  = [...ranked].sort((a,b)=> (b.wins/b.n) - (a.wins/a.n))[0];
+  const worst = [...ranked].sort((a,b)=> (a.wins/a.n) - (b.wins/b.n))[0];
+  const mostPlayed = [...ranked].sort((a,b)=> b.n - a.n)[0];
+  const card = (k, v, sub) => `<div class='glass card'><div class='k'>${k}</div><div class='v' style='font-size:16px'>${v}</div><div class='sub' style='font-size:11px;margin-top:4px'>${sub}</div></div>`;
+  host.innerHTML = [
+    card('Most played', mostPlayed.name, `${mostPlayed.n} games · ${(mostPlayed.wins/mostPlayed.n*100).toFixed(0)}% win`),
+    card('Best results', best.name, `${best.n} games · ${(best.wins/best.n*100).toFixed(0)}% win · ${best.accN?(best.accSum/best.accN).toFixed(1)+'%':'—'} acc`),
+    card('Worst results', worst.name, `${worst.n} games · ${(worst.wins/worst.n*100).toFixed(0)}% win · ${worst.accN?(worst.accSum/worst.accN).toFixed(1)+'%':'—'} acc`),
+  ].join('');
+}
+
+function renderOpponentBuckets(ins){
+  const b = ins.oppStrengthStats; const host = document.getElementById('opponentBuckets'); if(!host) return;
+  if(!b || (b.weaker.n + b.similar.n + b.stronger.n === 0)){
+    host.innerHTML = '<div class="sub" style="padding:14px">No opponent-rating data yet.</div>';
+    return;
+  }
+  const card = (label, bucket) => {
+    if(!bucket.n) return `<div class='glass card'><div class='k'>${label}</div><div class='v' style='font-size:16px;color:var(--muted)'>—</div><div class='sub' style='font-size:11px;margin-top:4px'>no games</div></div>`;
+    const rate = (bucket.wins/bucket.n*100).toFixed(0);
+    const acc  = bucket.accN ? (bucket.accSum/bucket.accN).toFixed(1)+'%' : '—';
+    const winClass = (bucket.wins/bucket.n) >= 0.5 ? 'win' : (bucket.wins/bucket.n) <= 0.35 ? 'loss' : 'draw';
+    return `<div class='glass card'><div class='k'>${label}</div><div class='v' style='font-size:22px' class='${winClass}'>${rate}% win</div><div class='sub' style='font-size:12px;margin-top:4px'>${bucket.wins}/${bucket.draws}/${bucket.losses} (${bucket.n} games) · ${acc} accuracy</div></div>`;
+  };
+  host.innerHTML = card(b.weaker.label, b.weaker) + card(b.similar.label, b.similar) + card(b.stronger.label, b.stronger);
+}
+
 function renderTimeControlTable(ins){
   const m=ins.byTimeControl; const t=document.getElementById('timeControlTable'); if(!t) return;
   if(!m || !m.size){ t.innerHTML='<tr><td>No data</td></tr>'; return; }
@@ -991,7 +1193,10 @@ function drawFeedDetails(filtered,pointMap){
     drawWeekdayChart(ins);
     drawHourChart(ins);
     drawConversionChart(ins);
+    drawPositionTypeChart(ins);
     renderTimeControlTable(ins);
+    renderOpeningTable(ins);
+    renderOpponentBuckets(ins);
     renderCoachNotes(ins);
     renderTopBlunders(ins);
   }
@@ -1201,6 +1406,9 @@ function applyBackendRowToPoint(point, beRec){
   point.nullEvals = beRec.null_evals||0;
   point.engineEvals = beRec.engine_evals||0;
   point.source = beRec.has_analysis ? 'backend' : point.source;
+  point.opening_eco = beRec.opening_eco || null;
+  point.opening_name = beRec.opening_name || null;
+  point.opening_ply = beRec.opening_ply || 0;
   if(point.evals && beRec.me_white !== undefined){
     const a = accFromEvals(point.evals, !!beRec.me_white);
     point.myAcc = a.me; point.oppAcc = a.opp;
