@@ -774,7 +774,113 @@ function aggregateInsights(filtered, points, user){
     openingStats: computeOpeningStats(valid),
     oppStrengthStats: computeOppStrengthStats(valid),
     positionTypeStats: computePositionTypeStats(valid),
+    byMoveLength: computeMoveLengthStats(valid),
+    byDuration: computeDurationStats(valid),
+    byFirstCapture: computeFirstCaptureStats(valid),
   };
+}
+
+// ===== Game-shape helpers (ply count, duration, first capture) =====
+function _emptyBucket(label){ return {label, n:0, wins:0, draws:0, losses:0, accs:[]}; }
+function _bucketTally(b, v){
+  b.n++;
+  if(v.persp.outcome==='Win') b.wins++;
+  else if(v.persp.outcome==='Draw') b.draws++;
+  else b.losses++;
+  if(v.point.myAcc != null) b.accs.push(v.point.myAcc);
+}
+function computeMoveLengthStats(valid){
+  const buckets = [
+    {min:0,   max:21,       label:'≤20 plies (snap)'},
+    {min:21,  max:41,       label:'21–40 plies'},
+    {min:41,  max:61,       label:'41–60 plies'},
+    {min:61,  max:81,       label:'61–80 plies'},
+    {min:81,  max:Infinity, label:'81+ plies (marathon)'},
+  ].map(b => ({...b, ..._emptyBucket(b.label)}));
+  for(const v of valid){
+    const plies = (v.point.evals || []).length - 1;
+    if(plies < 1) continue;
+    const b = buckets.find(x => plies>=x.min && plies<x.max);
+    if(b) _bucketTally(b, v);
+  }
+  return buckets;
+}
+
+// Parse total wall-clock seconds from chess.com PGN clock annotations.
+// Returns null when the PGN has no usable TimeControl + clock data (daily,
+// missing tags, or backend-only synthetic games).
+function parseGameDurationSec(pgn){
+  if(!pgn || typeof pgn !== 'string') return null;
+  const tcMatch = pgn.match(/\[TimeControl\s+"([^"]+)"\]/);
+  if(!tcMatch) return null;
+  const tc = tcMatch[1];
+  if(tc.includes('/')) return null; // daily correspondence -- skip
+  const parts = tc.split('+');
+  const base = parseInt(parts[0], 10);
+  const inc = parseInt(parts[1] || '0', 10);
+  if(isNaN(base)) return null;
+  const clocks = [];
+  const re = /\{\[%clk\s+(\d+):(\d+):([\d.]+)\]\}/g;
+  let m;
+  while((m = re.exec(pgn)) !== null){
+    clocks.push(parseInt(m[1],10)*3600 + parseInt(m[2],10)*60 + parseFloat(m[3]));
+  }
+  if(clocks.length < 2) return null;
+  const nWhite = Math.ceil(clocks.length / 2);
+  const nBlack = Math.floor(clocks.length / 2);
+  const lastWhite = clocks[(nWhite-1)*2];
+  const lastBlack = nBlack > 0 ? clocks[(nBlack-1)*2 + 1] : base;
+  const whiteUsed = base - lastWhite + nWhite * inc;
+  const blackUsed = base - lastBlack + nBlack * inc;
+  return Math.max(0, whiteUsed + blackUsed);
+}
+function computeDurationStats(valid){
+  const buckets = [
+    {min:0,   max:60,       label:'<1 min'},
+    {min:60,  max:180,      label:'1–3 min'},
+    {min:180, max:300,      label:'3–5 min'},
+    {min:300, max:600,      label:'5–10 min'},
+    {min:600, max:Infinity, label:'10+ min'},
+  ].map(b => ({...b, ..._emptyBucket(b.label)}));
+  for(const v of valid){
+    const sec = parseGameDurationSec(v.game && v.game.pgn);
+    if(sec == null) continue;
+    const b = buckets.find(x => sec>=x.min && sec<x.max);
+    if(b) _bucketTally(b, v);
+  }
+  return buckets;
+}
+
+// First-capture: walks the SAN tokens for the first move with 'x' and returns
+// which side (white/black) played it. Trivially fast; covers all captures
+// including pawn-takes-pawn and en-passant.
+function whoCapturedFirstPly(pgn){
+  if(!pgn) return {color:null, ply:null};
+  const moves = parseMoves(pgn);
+  for(let i=0; i<moves.length; i++){
+    if(/x/.test(moves[i])){
+      return {color: (i%2===0) ? 'white' : 'black', ply: i+1};
+    }
+  }
+  return {color:null, ply:null};
+}
+function computeFirstCaptureStats(valid){
+  const out = {
+    me:  {label:'You captured first',      ..._emptyBucket('You captured first'),      plySum:0, avgPly:null},
+    opp: {label:'Opponent captured first', ..._emptyBucket('Opponent captured first'), plySum:0, avgPly:null},
+    none:{label:'No captures',             n:0},
+  };
+  for(const v of valid){
+    const r = whoCapturedFirstPly(v.game && v.game.pgn);
+    if(r.color === null){ out.none.n++; continue; }
+    const meCapturedFirst = (r.color === 'white') === v.persp.meWhite;
+    const b = meCapturedFirst ? out.me : out.opp;
+    _bucketTally(b, v);
+    b.plySum += r.ply;
+  }
+  out.me.avgPly  = out.me.n  ? out.me.plySum  / out.me.n  : null;
+  out.opp.avgPly = out.opp.n ? out.opp.plySum / out.opp.n : null;
+  return out;
 }
 
 // === New insight helpers ===========================================
@@ -957,6 +1063,43 @@ function generateCoachNotes(ins){
     if(losing && losing.accN >= 10){
       const losAcc = losing.accSum/losing.accN;
       if(losAcc > 75) n.push(`You defend losing positions well (${losAcc.toFixed(1)}% accuracy when down 1–3 pawns) — a sign of good resilience instinct.`);
+    }
+  }
+  // --- Game-length insights ---
+  if(ins.byMoveLength){
+    const total = ins.byMoveLength.reduce((s,b)=>s+b.n,0);
+    if(total >= 10){
+      const short = ins.byMoveLength[0]; // ≤20 plies
+      const long  = ins.byMoveLength[4]; // 81+ plies
+      if(short.n >= 3 && long.n >= 3){
+        const dShort = short.wins/short.n*100, dLong = long.wins/long.n*100;
+        if(dShort - dLong > 15) n.push(`You win ${dShort.toFixed(0)}% of short games (≤20 plies) but only ${dLong.toFixed(0)}% of long ones — opponents who survive your opening tend to outlast you.`);
+        else if(dLong - dShort > 15) n.push(`You win ${dLong.toFixed(0)}% of long games (81+ plies) vs ${dShort.toFixed(0)}% of short ones — your edge grows with complexity.`);
+      }
+    }
+  }
+  // --- Duration insights ---
+  if(ins.byDuration){
+    const total = ins.byDuration.reduce((s,b)=>s+b.n,0);
+    if(total >= 8){
+      const accSorted = ins.byDuration.filter(b=>b.n>=3 && b.accs.length).map(b=>({label:b.label, acc:b.accs.reduce((a,c)=>a+c,0)/b.accs.length, n:b.n}));
+      if(accSorted.length >= 2){
+        const max = accSorted.reduce((a,b)=>a.acc>b.acc?a:b);
+        const min = accSorted.reduce((a,b)=>a.acc<b.acc?a:b);
+        if(max.acc - min.acc > 5){
+          n.push(`Accuracy varies ${(max.acc-min.acc).toFixed(1)}pp by clock duration: best at ${max.label} (${max.acc.toFixed(1)}%), worst at ${min.label} (${min.acc.toFixed(1)}%).`);
+        }
+      }
+    }
+  }
+  // --- First-capture insights ---
+  if(ins.byFirstCapture){
+    const me = ins.byFirstCapture.me, opp = ins.byFirstCapture.opp;
+    if(me.n >= 5 && opp.n >= 5){
+      const mr = me.wins/me.n*100, or = opp.wins/opp.n*100;
+      if(Math.abs(mr - or) > 10){
+        n.push(`Win rate ${mr.toFixed(0)}% when you take the first piece vs ${or.toFixed(0)}% when opponent does — ${mr>or?'initiating exchanges suits you':'initiating exchanges tends to backfire; let them commit first'}.`);
+      }
     }
   }
   return n;
@@ -1152,6 +1295,42 @@ function renderOpponentBuckets(ins){
   host.innerHTML = card(b.weaker.label, b.weaker) + card(b.similar.label, b.similar) + card(b.stronger.label, b.stronger);
 }
 
+function _renderBucketTable(elId, buckets, headerExtra='', rowExtra=null){
+  const t = document.getElementById(elId); if(!t) return;
+  const valid = buckets.filter(b=>b.n>0);
+  if(!valid.length){ t.innerHTML = '<tr><td>No data yet</td></tr>'; return; }
+  const rows = [`<tr><th>Bucket</th><th>Games</th><th>W/D/L</th><th>Win %</th><th>Acc</th>${headerExtra}</tr>`];
+  for(const b of valid){
+    const wr = (b.wins/b.n*100).toFixed(0);
+    const acc = b.accs.length ? (b.accs.reduce((a,c)=>a+c,0)/b.accs.length).toFixed(1)+'%' : '—';
+    const cls = (b.wins/b.n)>=0.55 ? 'win' : (b.wins/b.n)<=0.4 ? 'loss' : 'draw';
+    rows.push(`<tr><td>${b.label}</td><td>${b.n}</td><td>${b.wins}/${b.draws}/${b.losses}</td><td class='${cls}'>${wr}%</td><td>${acc}</td>${rowExtra?rowExtra(b):''}</tr>`);
+  }
+  t.innerHTML = rows.join('');
+}
+function renderMoveLengthTable(ins){ _renderBucketTable('moveLengthTable', ins.byMoveLength||[]); }
+function renderDurationTable(ins){
+  const t = document.getElementById('durationTable'); if(!t) return;
+  const valid = (ins.byDuration||[]).filter(b=>b.n>0);
+  if(!valid.length){ t.innerHTML = '<tr><td>No clock data available (PGN missing %clk tags or daily games)</td></tr>'; return; }
+  _renderBucketTable('durationTable', ins.byDuration||[]);
+}
+function renderFirstCaptureTable(ins){
+  const t = document.getElementById('firstCaptureTable'); if(!t) return;
+  const s = ins.byFirstCapture; if(!s){ t.innerHTML='<tr><td>No data</td></tr>'; return; }
+  const rows = [`<tr><th>First capture</th><th>Games</th><th>W/D/L</th><th>Win %</th><th>Acc</th><th>Avg ply</th></tr>`];
+  for(const k of ['me','opp']){
+    const b = s[k]; if(!b.n) continue;
+    const wr = (b.wins/b.n*100).toFixed(0);
+    const acc = b.accs.length ? (b.accs.reduce((a,c)=>a+c,0)/b.accs.length).toFixed(1)+'%' : '—';
+    const cls = (b.wins/b.n)>=0.55 ? 'win' : (b.wins/b.n)<=0.4 ? 'loss' : 'draw';
+    const avgPly = b.avgPly!=null ? b.avgPly.toFixed(1) : '—';
+    rows.push(`<tr><td>${b.label}</td><td>${b.n}</td><td>${b.wins}/${b.draws}/${b.losses}</td><td class='${cls}'>${wr}%</td><td>${acc}</td><td>${avgPly}</td></tr>`);
+  }
+  if(s.none && s.none.n) rows.push(`<tr><td>No captures in game</td><td>${s.none.n}</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>`);
+  t.innerHTML = rows.join('');
+}
+
 function renderTimeControlTable(ins){
   const m=ins.byTimeControl; const t=document.getElementById('timeControlTable'); if(!t) return;
   if(!m || !m.size){ t.innerHTML='<tr><td>No data</td></tr>'; return; }
@@ -1197,6 +1376,9 @@ function drawFeedDetails(filtered,pointMap){
     renderTimeControlTable(ins);
     renderOpeningTable(ins);
     renderOpponentBuckets(ins);
+    renderMoveLengthTable(ins);
+    renderDurationTable(ins);
+    renderFirstCaptureTable(ins);
     renderCoachNotes(ins);
     renderTopBlunders(ins);
   }

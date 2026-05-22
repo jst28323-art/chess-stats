@@ -65,7 +65,7 @@ canvas{width:100% !important;height:100% !important;}
       <select id="timeClassFilter"><option value="all">All types</option><option value="bullet">Bullet</option><option value="blitz">Blitz</option><option value="rapid">Rapid</option><option value="daily">Daily</option></select>
       <select id="gameCountFilter"><option value="50">Last 50 games</option><option value="100" selected>Last 100 games</option><option value="250">Last 250 games</option><option value="500">Last 500 games</option></select>
       <button id="loadBtn">Update Dashboard</button>
-      <span id="status" class="sub"></span><span id="buildStamp" class="sub" style="margin-left:8px">Build 2026-05-21.22</span><span id="engineDiag" class="sub" style="margin-left:8px">Engine: init</span>
+      <span id="status" class="sub"></span><span id="buildStamp" class="sub" style="margin-left:8px">Build 2026-05-21.23</span><span id="engineDiag" class="sub" style="margin-left:8px">Engine: init</span>
     </div>
     <div class="toolbar" style="margin-top:6px">
       <input id="backendUrl" placeholder="http://localhost:8787" style="min-width:240px" />
@@ -113,6 +113,15 @@ canvas{width:100% !important;height:100% !important;}
   </section>
 
   <section class="section">
+    <h3>Game Shape</h3>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
+      <div class="glass" style="padding:14px"><div class='k' style='margin-bottom:8px'>By move count</div><div class='table-wrap' style='padding:0'><table id="moveLengthTable"></table></div></div>
+      <div class="glass" style="padding:14px"><div class='k' style='margin-bottom:8px'>By clock duration</div><div class='table-wrap' style='padding:0'><table id="durationTable"></table></div></div>
+      <div class="glass" style="padding:14px"><div class='k' style='margin-bottom:8px'>By first capture</div><div class='table-wrap' style='padding:0'><table id="firstCaptureTable"></table></div></div>
+    </div>
+  </section>
+
+  <section class="section">
     <h3>By Time Control</h3>
     <div class="glass table-wrap"><table id="timeControlTable"></table></div>
   </section>
@@ -125,6 +134,6 @@ canvas{width:100% !important;height:100% !important;}
     </div>
   </section>
 </div>
-<script src="app.js?v=2026-05-21.22"></script>
+<script src="app.js?v=2026-05-21.23"></script>
 </body>
 </html>
