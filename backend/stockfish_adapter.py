@@ -2,8 +2,15 @@
 
 Uses python-chess's engine interface. Auto-discovers the stockfish binary via:
   1. STOCKFISH_PATH env var
-  2. shutil.which("stockfish")
-  3. A list of common install locations (Windows + POSIX)
+  2. A list of common install locations (Windows + POSIX), incl. the bundled
+     backend/bin/stockfish.exe
+  3. shutil.which("stockfish"), restricted to real executables
+
+The bundled binary is checked before shutil.which on purpose: on Windows the
+default PATHEXT includes .JS, so shutil.which("stockfish") will match the
+repo-root browser engine stockfish.js when the backend's cwd is the repo root.
+That .js file is not a runnable UCI engine and raises WinError 193 ("%1 is not
+a valid Win32 application"), so it must never win path resolution.
 """
 from __future__ import annotations
 
@@ -36,17 +43,29 @@ _COMMON_POSIX_PATHS = [
 ]
 
 
+def _is_runnable_engine(path: str) -> bool:
+    """Reject non-executable matches. On Windows, shutil.which can return a
+    script (e.g. stockfish.js via PATHEXT containing .JS); only native
+    executables can be launched as a UCI engine."""
+    if os.name == "nt":
+        return Path(path).suffix.lower() in {".exe", ".com"}
+    return True
+
+
 def find_stockfish() -> str | None:
     env = os.environ.get("STOCKFISH_PATH")
     if env and Path(env).exists():
         return env
-    which = shutil.which("stockfish") or shutil.which("stockfish.exe")
-    if which:
-        return which
+    # Explicit candidates (incl. bundled bin/stockfish.exe) BEFORE shutil.which,
+    # so the repo-root stockfish.js can never be picked up via PATHEXT .JS.
     candidates = _COMMON_WIN_PATHS if os.name == "nt" else _COMMON_POSIX_PATHS
     for p in candidates:
         if Path(p).exists():
             return p
+    # Last resort: PATH lookup, guarded so a non-executable match is ignored.
+    which = shutil.which("stockfish") or shutil.which("stockfish.exe")
+    if which and _is_runnable_engine(which):
+        return which
     return None
 
 
